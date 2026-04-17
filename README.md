@@ -3,210 +3,258 @@ With this project I am trying to create a microcontroller device that, based on 
 
 Here I present the work schedule for this project:
 
-Here's the plan as plain text you can copy:
+# Engineering Thesis — Detailed Project Plan
+*Microprocessor-based system for monitoring and supporting mountain guides with an early warning function for atmospheric hazards*
+
+**Deadline: June 12, 2026**
 
 ---
 
-**ENGINEERING THESIS — DETAILED PROJECT PLAN**
-*Microprocessor-based atmospheric hazard early warning system*
+## Phase 1 — Hardware MVP
+**Apr 17 – Apr 30**
+
+> No BLE needed here — your existing Classic BT firmware is fine. The MVP just needs to work standalone: simulation mode, LEDs, and battery.
+
+### Week 1 (Apr 17–20)
+
+**Fri Apr 17 — Add simulation mode to firmware**
+Add a `#define SIMULATION_MODE` compile flag. When enabled, replace sensor reads with scripted fake values that slowly drop pressure over time, triggering all four alert levels in sequence. All output goes to Serial monitor.
+
+**Sat Apr 18 — Test and tune simulation mode**
+Run through CLEAR → WATCH → WARNING → SEVERE on the Serial monitor. Adjust pressure drop constants if thresholds feel wrong. This is your main testing tool for all future hardware work.
+
+**Sun Apr 19 — Rest**
+
+**Mon Apr 20 — Wire 3 LEDs to ESP32**
+Use GPIO 25, 26, 27 with 220Ω resistors. Green = CLEAR, yellow = WATCH, red = WARNING and SEVERE. Update the alert handler in firmware to set the correct LED on every alert change.
+
+### Week 2 (Apr 21–27)
+
+**Tue Apr 21 — Add passive buzzer**
+Wire to GPIO 32. Short single beep on WATCH, two beeps on WARNING, repeating pattern on SEVERE. Use `tone()` or manual `digitalWrite` with delay.
+
+**Wed Apr 22 — Integration test — standalone device**
+Run simulation mode with no phone connected. Confirm LEDs and buzzer respond correctly to all four alert levels. The device must be fully usable without a phone.
+
+**Thu Apr 23 — Research LiPo battery + TP4056 charger module**
+Any 3.7V LiPo (1000–2000 mAh). TP4056 module handles USB charging. Both widely available. Order or buy locally today so they arrive before the weekend.
+
+**Fri Apr 24 — Wire battery circuit**
+LiPo → TP4056 OUT → ESP32 VIN. Add an on/off switch in the positive line. Charge battery separately before connecting ESP32.
+
+**Sat Apr 25 — Test battery runtime**
+Fully charge, run device in simulation mode with 30-second read intervals. Note how long it lasts. Add battery voltage reading via voltage divider on ADC pin GPIO 34.
+
+**Sun Apr 26 — Rest**
+
+**Mon Apr 27 — Add battery level to BT output**
+Add a `bat` field to the JSON payload. Formula: map voltage 3.3V–4.2V to 0–100%. Display percentage in Serial debug output.
+
+### Week 3 start (Apr 28–30)
+
+**Tue Apr 28 — Clean up firmware and push to GitHub**
+Remove debug prints, add clear comments to key functions, document the simulation mode flag at the top of the file. Commit and push.
+
+**Wed Apr 29 — Hardware MVP final test**
+Full run: battery powered, simulation mode cycling through all alert levels, correct LEDs and buzzer, JSON arriving on phone via Serial BT Monitor app. Hardware MVP complete.
+
+**Thu Apr 30 — Buffer day**
+Fix anything that broke. Write brief notes on what you built — these go directly into the thesis hardware chapter later.
+
+**Deliverable:** Battery-powered ESP32 with BME280, simulation mode, LED + buzzer alert system, Classic BT streaming JSON.
 
 ---
 
-**PHASE 0 — Tech stack & environment setup | COMPLETE**
+## Phase 2 — Basic Mobile App
+**May 1 – May 19**
 
-All done:
-- ESP32-WROOM-32 DevKit chosen and working
-- BME280 wired and reading over I²C
-- Arduino IDE set up and firmware uploading
-- Classic Bluetooth serial tested with Serial BT Monitor app
+> This phase starts with switching the firmware from Classic BT to BLE — one focused day using the BLE firmware already written. Then Flutter app development begins.
 
----
+### Week 3 cont. — BLE firmware switch (May 1–4)
 
-**PHASE 1 — Hardware MVP | Apr 3 – Apr 7**
+**Fri May 1 — Flash BLE firmware, verify with nRF Connect app**
+Use the BLE firmware already prepared. Install nRF Connect on your phone, scan for "MountainGuide_Weather", subscribe to the DATA characteristic and confirm JSON arrives. Install NimBLE-Arduino library in Arduino IDE first.
 
-Already done:
-- Sensor reading loop with error handling
-- 4-level alert system (CLEAR / WATCH / WARNING / SEVERE)
-- 3-hour pressure history buffer with 30-min and 3-hour drop analysis
-- Classic BT serial sending JSON data to phone
-- Command handler (STATUS, RESET, PING, INFO)
+**Sat May 2 — Install Flutter and Android Studio**
+Follow flutter.dev/docs/get-started/install. Run `flutter doctor` and fix any issues. This can take 1–2 hours. Create a test project and run hello world on your phone to confirm setup works.
 
-Still to do:
+**Sun May 3 — Rest**
 
-Apr 3–4 — Wire SSD1306 OLED display (128×64, I²C)
-Same I²C bus as BME280, just add it to D21/D22 at address 0x3C. Use Adafruit SSD1306 library.
+**Mon May 4 — Create Flutter project, add flutter_blue_plus package**
+`flutter create weather_app`. Add `flutter_blue_plus` to pubspec.yaml. Run the package example on your phone to confirm BLE scanning works.
 
-Apr 4–5 — Show live readings and alert level on OLED
-Page 1: temp/humidity/pressure. Page 2: alert level and pressure trend arrows. Auto-cycle every 3 seconds.
+### Week 4 — BLE connection + data (May 5–11)
 
-Apr 5–6 — Wire LED (3-color or 3 separate) and passive buzzer
-Green = CLEAR, yellow = WATCH, red = WARNING/SEVERE. Buzzer beep pattern on alert change.
+**Tue May 5 — Build BLE scan screen**
+List nearby BLE devices. Filter for "MountainGuide_Weather" by name. Show connect button.
 
-Apr 6–7 — Integration test, full loop without phone
-Device must be fully usable standalone: readings on screen, alert on LED. Bluetooth is a bonus, not a dependency.
+**Wed May 6 — Implement connect + subscribe to DATA notifications**
+On tap, connect to device and discover services. Find DATA characteristic by UUID and subscribe. Print raw values to console to confirm data is arriving.
 
-Deliverable: Device works fully standalone — OLED shows data, LED and buzzer signal danger, BT streams JSON.
+**Thu May 7 — Parse JSON into a data model**
+Create a `WeatherData` class: temp, pressure, humidity, alert, p_drop_3h, p_drop_30m. Strip the `DATA:` prefix, decode JSON, populate the model.
 
----
+**Fri May 8 — Handle ALERT and SYSTEM message prefixes**
+Route incoming strings by prefix. DATA goes to JSON parser, ALERT goes to notification handler, SYSTEM to a log. Keeps code clean as you add features.
 
-**PHASE 2 — Basic mobile app | Apr 7 – Apr 20**
+**Sat May 9 — Build main screen — live sensor values**
+Large readable numbers for temp, pressure, humidity. Update in real time. Show timestamp of last reading.
 
-Note: The firmware uses Classic Bluetooth SPP (not BLE), which means Android only. iOS blocks classic BT in third-party apps. Worth clarifying with your supervisor early.
+**Sun May 10 — Rest**
 
-Week 1 — BT connection and live data (Apr 7–13):
+**Mon May 11 — Add color-coded alert banner**
+Full-width strip at the top. Green = CLEAR, yellow = WATCH, orange = WARNING, red = SEVERE. Show alert name and short description text.
 
-Apr 7–8 — Choose framework and set up project
-Recommendation: Flutter with the flutter_bluetooth_serial package. Android-only is fine for SPP. MIT App Inventor is an option for a very fast MVP if needed.
+### Week 5 — Safety features + testing (May 12–19)
 
-Apr 8–9 — Implement Classic BT scan, pair, and connect
-Filter by device name "MountainGuide_Weather". Handle connect/disconnect gracefully.
+**Tue May 12 — Send STATUS command on app open**
+Write `STATUS` to CMD characteristic immediately after connecting. Forces device to send a reading right away so user doesn't wait 5 minutes.
 
-Apr 9–11 — Subscribe to incoming data stream and parse JSON
-Split on newline, detect DATA:{...} vs ALERT:... vs SYSTEM:... prefixes. Map to a data model.
+**Wed May 13 — Show pressure trend values**
+Display p_drop_3h and p_drop_30m from JSON. Use arrows: ↓↓ fast drop, ↓ slow drop, → stable.
 
-Apr 11–13 — Build main screen with live readings and color-coded alert banner
-Large readable numbers. Green/yellow/orange/red background strip based on alert level. Timestamp of last reading.
+**Thu May 14 — Background notifications on alert change**
+Use `flutter_local_notifications`. When ALERT message arrives with a higher level than last known, fire a local push notification. Critical for mountain safety use.
 
-Week 2 — Safety features and polish (Apr 13–20):
+**Fri May 15 — BLE reconnect logic**
+Auto-scan and reconnect to "MountainGuide_Weather" every 5 seconds after disconnect. Show "Reconnecting..." in UI.
 
-Apr 13–15 — Send STATUS command on app open to get an immediate reading
-Don't make the user wait 5 minutes for first data. Add a manual refresh button too.
+**Sat May 16 — End-to-end testing**
+Full flow: open app, connect, trigger all 4 alert levels via simulation mode, confirm notifications in background. Test on 2 phones if possible.
 
-Apr 15–17 — Alert change notifications when app is backgrounded
-Local notifications triggered when an ALERT: message is received. This is critical for mountain use.
+**Sun May 17 — Rest**
 
-Apr 17–18 — Show pressure trend values (p_drop_3h and p_drop_30m)
-Already present in the JSON — just display them. Down arrows for fast/slow drop, right arrow for stable.
+**Mon May 18 — Bug fixes**
+Fix anything broken from testing. Prioritise: crashes on disconnect, missing notifications, incorrect JSON parsing.
 
-Apr 18–20 — End-to-end testing and reconnect logic
-Test BT drop and auto-reconnect. Test notifications in background. Test on at least 2 Android devices if possible.
+**Tue May 19 — App MVP done — push code to GitHub**
+Clean up code, add comments, push. Take screenshots of every screen in a clean state — you will need them for the thesis.
 
-Deliverable: Android app connects to device, shows live data with color-coded danger level, sends background notifications on alert change.
+**Deliverable:** Flutter app connects via BLE, shows live data with color-coded alert, sends background notifications on alert change.
 
 ---
 
-**PHASE 3 — Hardware improvement | Apr 20 – May 7**
+## Phase 3 — OLED Screen
+**May 20 – May 27**
 
-Apr 20–22 — Improve storm algorithm (v2)
-Add temperature drop rate as a third factor — rapid cooling combined with pressure drop and high humidity is the most reliable thunderstorm signature. Also add altitude compensation for the pressure baseline.
+> Adding the OLED display to the device so it works fully standalone without any phone. Wired to the same I²C bus as the BME280.
 
-Apr 22–24 — Add power supply: LiPo 3.7V + TP4056 charger + voltage divider for battery level
-Expose battery percentage in the BT JSON payload (add a "bat" field). Show on OLED.
+**Wed May 20 — Wire SSD1306 OLED display (128×64, I²C)**
+Same I²C bus as BME280 — connect to D21/D22. OLED uses address 0x3C. Install Adafruit SSD1306 and Adafruit GFX libraries in Arduino IDE.
 
-Apr 24–25 — Implement deep sleep between readings
-ESP32 light sleep with timer wakeup every 5 minutes. Target 24h+ battery life. Measure actual current draw.
+**Thu May 21 — Display basic readings on screen**
+Show temperature, pressure, humidity on one screen. Confirm values match Serial output. BME280 is at 0x76 and OLED at 0x3C — different addresses, no conflict.
 
-Apr 25–28 — Field test 1 — take device outdoors for 2+ hours
-Log data and compare with a reference (phone weather app or nearby station). Tune thresholds if false positives occur.
+**Fri May 22 — Add alert level display page**
+Second screen showing current alert level in large text (CLEAR / WATCH / WARNING / SEVERE) and pressure trend arrows. Auto-cycle between screen 1 and screen 2 every 3 seconds.
 
-Apr 28 – May 1 — Permanent build: solder onto perfboard or simple PCB
-Use EasyEDA to draw the schematic (you'll need it for the thesis anyway). Solder components and verify robustness.
+**Sat May 23 — Polish OLED layout**
+Add battery percentage to the display. Make sure text fits cleanly at all alert levels. Test all four states using simulation mode.
 
-May 1–4 — Design and build enclosure
-3D print or modify a project box. Ensure the sensor is vented, OLED is visible, USB-C for charging is accessible, and LED is visible.
+**Sun May 24 — Rest**
 
-May 4–6 — Field test 2 — full device in enclosure
-Confirm readings aren't affected by enclosure heat. Test BT range through the enclosure.
+**Mon May 25 — Full integration test with OLED**
+Device runs standalone: OLED shows data, LEDs and buzzer signal danger, BLE streams JSON to phone, all powered by battery. Test for 30+ minutes.
 
-May 6–7 — Final hardware fixes and cleanup
-Cable management, strain relief, label connectors for thesis photos.
+**Tue May 26 — Clean up firmware, push to GitHub**
+Commit the OLED version. Take photos of the complete device — front, side, showing screen — for the thesis hardware chapter.
 
-Deliverable: Battery-powered enclosed device with improved algorithm, verified by at least two field tests.
+**Wed May 27 — Buffer day**
+Fix any remaining hardware issues. After this point the device is feature-complete.
 
----
-
-**PHASE 4 — App improvement | May 7 – May 18**
-
-May 7–9 — Local data logging: store last 24 hours of readings
-SQLite via sqflite (Flutter) or SharedPreferences for a simple JSON log. Persist across restarts.
-
-May 9–11 — History charts for pressure, temperature, and humidity
-Line chart using fl_chart (Flutter). Mark warning events on the pressure chart — this will look strong in the thesis.
-
-May 11–12 — Altitude estimation from pressure
-Hypsometric formula. Useful, easy to add, and professionally relevant for mountain guides.
-
-May 12–14 — Storm risk trend indicator
-Show whether danger is rising or falling based on the last 3 readings. Arrow plus text description.
-
-May 14–16 — UI polish: typography, spacing, dark mode
-Make it look presentable for the thesis defense and documentation screenshots.
-
-May 16–18 — Final testing and clean screenshots for thesis
-Screenshot every screen in a clean state. These go directly into your documentation.
-
-Deliverable: Polished app with history charts, altitude estimation, storm trend indicator, and dark mode.
+**Deliverable:** Complete standalone device: OLED shows live readings and alert level, LEDs and buzzer signal danger, BLE streams to phone, runs on battery.
 
 ---
 
-**PHASE 5 — Thesis: hardware chapter | May 18 – May 25**
+## Phase 4 — Optional Improvements (if time)
+**May 27 – Jun 1**
 
-May 18–19 — Component selection rationale
-Why ESP32, why BME280, alternatives considered, comparison table.
+### Hardware side
 
-May 19–20 — Circuit schematic and system block diagram
-Use KiCad or EasyEDA (you'll have the schematic from Phase 3 already). Block diagram: sensor → MCU → display / BT / LED / power.
+**May 27–28 — Improve prediction algorithm (v2)**
+Add temperature drop rate as a third factor. Document updated thresholds — needed for thesis anyway.
 
-May 20–21 — Algorithm description with flowchart
-Document the v2 algorithm: rolling buffer, drop calculation, decision logic, all thresholds. Include a flowchart as a figure.
+**May 28–29 — Deep sleep between readings**
+ESP32 light sleep with timer wakeup. Target 24h+ battery life. Measure actual current draw.
 
-May 21–22 — Power system and battery life measurements
-LiPo specs, TP4056 circuit, measured current in active vs sleep modes, calculated battery life.
+**May 29–30 — Enclosure / casing**
+3D printed case or project box. Ensure sensor is vented, OLED visible, USB-C charging accessible.
 
-May 22–24 — Test results and measurement accuracy
-Comparison table: device vs reference station. Error margins. Field test conditions and findings.
+### App side
 
-May 24–25 — Review and tidy hardware chapter
+**May 28–30 — Local data logging + history charts**
+Store last 24h readings. Line chart for pressure over time using `fl_chart`. Mark warning events on the chart.
 
-Deliverable: Complete hardware chapter with schematics, algorithm flowchart, and field test data.
+**May 30–Jun 1 — UI polish, dark mode, screenshots**
+Consistent typography, spacing, dark mode. Retake clean screenshots for all screens.
 
----
-
-**PHASE 6 — Thesis: software chapter | May 25 – Jun 1**
-
-May 25–26 — Firmware architecture on ESP32
-Main loop structure, sensor → algorithm → BT data flow.
-
-May 26–27 — Communication protocol documentation
-Document the text protocol: DATA:{...} format, ALERT: format, command set (STATUS / RESET / PING / INFO). Already well-defined in the code.
-
-May 27–28 — App architecture overview
-BT layer, data parsing layer, UI layer, state management approach.
-
-May 28–29 — Screen-by-screen UI documentation with annotated screenshots
-Use the screenshots from Phase 4. Annotate with callouts in a drawing tool.
-
-May 29–31 — Safety and reliability section
-Behavior on BT disconnect, sensor failure, low battery. Relevant for the safety-critical mountain guide use case.
-
-May 31 – Jun 1 — Review and tidy software chapter
-
-Deliverable: Complete software chapter with architecture diagrams, protocol documentation, and annotated UI screenshots.
+**Deliverable:** Improved algorithm, lower power use, device in a case, polished app with history charts.
 
 ---
 
-**PHASE 7 — Promotional corrections and final document | Jun 1 – Jun 8**
+## Phase 5 — Thesis: Hardware Chapter
+**May 27 – Jun 3**
 
-Jun 1–2 — Abstract, introduction, problem statement
-Frame the safety context: lightning is the leading cause of weather-related outdoor fatalities in the mountains.
+**Tue May 27 — Component selection rationale**
+Why ESP32, why BME280, alternatives considered. Comparison table of microcontroller options.
 
-Jun 2–3 — Literature review
-Existing weather monitoring systems, BT/BLE sensor nodes, barometric storm prediction research, mountain guide safety standards.
+**Wed May 28 — Circuit schematic and system block diagram**
+Draw schematic in EasyEDA or KiCad. Block diagram: sensor → MCU → OLED / LEDs / BLE / power.
 
-Jun 3–4 — Conclusions and future work
-Future work ideas: AS3935 lightning sensor integration, GPS, mesh networking between multiple guides.
+**Thu May 29 — Algorithm description with flowchart**
+Document the decision logic: rolling buffer, pressure drop calculation, threshold table, all four alert levels. Draw a flowchart.
 
-Jun 4–6 — Full document pass: formatting, figures, references, table of contents
-Check figure numbering, citation style, list of figures, abbreviations list.
+**Fri May 30 — Power system section**
+LiPo specs, TP4056 circuit, measured current draw, estimated and actual battery life.
 
-Jun 6–8 — Supervisor review, address feedback, final proofread
+**Sat May 31 — Test results and measurement accuracy**
+Table comparing device readings vs phone weather app. Note error margins and conditions.
 
-Deliverable: Complete, proofread thesis document ready for submission.
+**Sun Jun 1 — Rest / review hardware chapter**
+
+**Deliverable:** Complete hardware chapter draft with schematics, algorithm flowchart, and test data.
 
 ---
 
-**BUFFER WEEK | Jun 8 – Jun 15**
+## Phase 6 — Thesis: Software Chapter
+**Jun 2 – Jun 8**
 
-Reserve for: hardware debugging, catching up on any slipped phase, supervisor correction round, thesis printing and binding.
+**Mon Jun 2 — Firmware architecture**
+Main loop structure, simulation mode design, sensor → algorithm → output data flow. Include a simple diagram.
 
-Final submission deadline: June 15.
+**Tue Jun 3 — BLE communication protocol documentation**
+Service UUID, characteristic UUIDs, every message format: DATA / ALERT / SYSTEM / ERROR. Command set: STATUS / RESET / PING / INFO.
+
+**Wed Jun 4 — App architecture overview**
+Layer diagram: BLE layer, data parsing, UI layer. Screen flow diagram. State management approach.
+
+**Thu Jun 5 — Screen-by-screen UI documentation**
+Use the screenshots taken after Phase 2 and Phase 4. Annotate each screenshot with callouts explaining the elements.
+
+**Fri Jun 6 — Safety and reliability section**
+Behavior when BLE disconnects, sensor fails, battery dies. Relevant for safety-critical mountain guide use case.
+
+**Sat Jun 7 — Review and tidy software chapter**
+
+**Sun Jun 8 — Rest**
+
+**Deliverable:** Complete software chapter with architecture diagrams, protocol docs, and annotated screenshots.
+
+---
+
+## Phase 7 — Final Thesis Document
+**Jun 9 – Jun 12**
+
+**Mon Jun 9 — Abstract, introduction, literature review, conclusions**
+Introduction: frame the safety context (lightning fatalities in mountains). Literature review: existing weather monitoring systems, BLE sensor nodes, barometric prediction methods. Conclusions: results summary + future work (AS3935 lightning sensor, GPS, mesh networking).
+
+**Tue Jun 10 — Full document pass**
+Formatting, figure numbering, citations, table of contents, list of figures, abbreviations list.
+
+**Wed Jun 11 — Supervisor review and corrections**
+Send draft. Implement all requested changes promptly.
+
+**Thu Jun 12 — Final proofread and submit**
+Deadline.
+
+**Deliverable:** Complete, proofread thesis submitted by June 12.
