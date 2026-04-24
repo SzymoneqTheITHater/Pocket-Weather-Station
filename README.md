@@ -66,7 +66,7 @@ Fix anything that broke. Write brief notes on what you built — these go direct
 ---
 
 ## Phase 2 — Basic Mobile App
-**May 1 – May 19**
+**May 1 – May 21**
 
 > This phase starts with switching the firmware from Classic BT to BLE — one focused day using the BLE firmware already written. Then Flutter app development begins.
 
@@ -124,10 +124,16 @@ Full flow: open app, connect, trigger all 4 alert levels via simulation mode, co
 
 **Sun May 17 — Rest**
 
-**Mon May 18 — Bug fixes**
+**Mon May 18 — Bug fixes (day 1)**
 Fix anything broken from testing. Prioritise: crashes on disconnect, missing notifications, incorrect JSON parsing.
 
-**Tue May 19 — App MVP done — push code to GitHub**
+**Tue May 19 — Bug fixes (day 2) + additional device testing**
+Continue fixing issues. Test on a second phone if possible. Verify background notifications work reliably.
+
+**Wed May 20 — Final verification pass**
+Full end-to-end flow on a clean app install. Confirm all four alert levels, reconnect logic, and notifications behave correctly.
+
+**Thu May 21 — App MVP done — push code to GitHub**
 Clean up code, add comments, push. Take screenshots of every screen in a clean state — you will need them for the thesis.
 
 **Deliverable:** Flutter app connects via BLE, shows live data with color-coded alert, sends background notifications on alert change.
@@ -135,80 +141,73 @@ Clean up code, add comments, push. Take screenshots of every screen in a clean s
 ---
 
 ## Phase 3 — OLED Screen
-**May 20 – May 27**
+**May 22 – May 29**
 
 > Adding the OLED display to the device so it works fully standalone without any phone. Wired to the same I²C bus as the BME280.
 
-**Wed May 20 — Wire SSD1306 OLED display (128×64, I²C)**
+**Fri May 22 — Wire SSD1306 OLED display (128×64, I²C)**
 Same I²C bus as BME280 — connect to D21/D22. OLED uses address 0x3C. Install Adafruit SSD1306 and Adafruit GFX libraries in Arduino IDE.
 
-**Thu May 21 — Display basic readings on screen**
+**Sat May 23 — Display basic readings on screen**
 Show temperature, pressure, humidity on one screen. Confirm values match Serial output. BME280 is at 0x76 and OLED at 0x3C — different addresses, no conflict.
-
-**Fri May 22 — Add alert level display page**
-Second screen showing current alert level in large text (CLEAR / WATCH / WARNING / SEVERE) and pressure trend arrows. Auto-cycle between screen 1 and screen 2 every 3 seconds.
-
-**Sat May 23 — Polish OLED layout**
-Add battery percentage to the display. Make sure text fits cleanly at all alert levels. Test all four states using simulation mode.
 
 **Sun May 24 — Rest**
 
-**Mon May 25 — Full integration test with OLED**
+**Mon May 25 — Add alert level display page**
+Second screen showing current alert level in large text (CLEAR / WATCH / WARNING / SEVERE) and pressure trend arrows. Auto-cycle between screen 1 and screen 2 every 3 seconds.
+
+**Tue May 26 — Polish OLED layout**
+Add battery percentage to the display. Make sure text fits cleanly at all alert levels. Test all four states using simulation mode.
+
+**Wed May 27 — Full integration test with OLED**
 Device runs standalone: OLED shows data, LEDs and buzzer signal danger, BLE streams JSON to phone, all powered by battery. Test for 30+ minutes.
 
-**Tue May 26 — Clean up firmware, push to GitHub**
+**Thu May 28 — Clean up firmware, push to GitHub**
 Commit the OLED version. Take photos of the complete device — front, side, showing screen — for the thesis hardware chapter.
 
-**Wed May 27 — Buffer day**
+**Fri May 29 — Buffer day**
 Fix any remaining hardware issues. After this point the device is feature-complete.
 
 **Deliverable:** Complete standalone device: OLED shows live readings and alert level, LEDs and buzzer signal danger, BLE streams to phone, runs on battery.
 
 ---
 
-## Phase 4 — Optional Improvements (if time)
-**May 27 – Jun 1**
+## Phase 4 — Optional Improvements (skip if behind schedule)
+**May 30 – May 31**
 
-### Hardware side
+> Strictly optional. If Phase 3 ran over or thesis writing (Phase 5) is behind, skip this phase entirely. Only proceed if you are ahead of schedule. Enclosure, data logging, and UI polish are deferred indefinitely.
 
-**May 27–28 — Improve prediction algorithm (v2)**
+**Fri May 30 — Improve prediction algorithm (v2)**
 Add temperature drop rate as a third factor. Document updated thresholds — needed for thesis anyway.
 
-**May 28–29 — Deep sleep between readings**
+**Sat May 31 — Deep sleep between readings**
 ESP32 light sleep with timer wakeup. Target 24h+ battery life. Measure actual current draw.
 
-**May 29–30 — Enclosure / casing**
-3D printed case or project box. Ensure sensor is vented, OLED visible, USB-C charging accessible.
-
-### App side
-
-**May 28–30 — Local data logging + history charts**
-Store last 24h readings. Line chart for pressure over time using `fl_chart`. Mark warning events on the chart.
-
-**May 30–Jun 1 — UI polish, dark mode, screenshots**
-Consistent typography, spacing, dark mode. Retake clean screenshots for all screens.
-
-**Deliverable:** Improved algorithm, lower power use, device in a case, polished app with history charts.
+**Deliverable (if completed):** Improved algorithm, lower power use.
 
 ---
 
 ## Phase 5 — Thesis: Hardware Chapter
-**May 27 – Jun 3**
+**May 25 – Jun 1**
 
-**Tue May 27 — Component selection rationale**
+> Start writing alongside the tail end of Phase 3. Use evenings May 25–29 for thesis work while OLED hardware tasks wrap up during the day.
+
+**Mon May 25 — Component selection rationale**
 Why ESP32, why BME280, alternatives considered. Comparison table of microcontroller options.
 
-**Wed May 28 — Circuit schematic and system block diagram**
+**Tue May 26 — Circuit schematic and system block diagram**
 Draw schematic in EasyEDA or KiCad. Block diagram: sensor → MCU → OLED / LEDs / BLE / power.
 
-**Thu May 29 — Algorithm description with flowchart**
+**Wed May 27 — Algorithm description with flowchart**
 Document the decision logic: rolling buffer, pressure drop calculation, threshold table, all four alert levels. Draw a flowchart.
 
-**Fri May 30 — Power system section**
+**Thu May 28 — Power system section**
 LiPo specs, TP4056 circuit, measured current draw, estimated and actual battery life.
 
-**Sat May 31 — Test results and measurement accuracy**
+**Fri May 29 — Test results and measurement accuracy**
 Table comparing device readings vs phone weather app. Note error margins and conditions.
+
+**Sat May 30 — Expand any hardware chapter section** *(skip if doing Phase 4 optional work)*
 
 **Sun Jun 1 — Rest / review hardware chapter**
 
@@ -243,16 +242,22 @@ Behavior when BLE disconnects, sensor fails, battery dies. Relevant for safety-c
 ---
 
 ## Phase 7 — Final Thesis Document
-**Jun 9 – Jun 12**
+**Jun 7 – Jun 12**
 
-**Mon Jun 9 — Abstract, introduction, literature review, conclusions**
-Introduction: frame the safety context (lightning fatalities in mountains). Literature review: existing weather monitoring systems, BLE sensor nodes, barometric prediction methods. Conclusions: results summary + future work (AS3935 lightning sensor, GPS, mesh networking).
+**Sat Jun 7 — Abstract and introduction draft** *(parallel with Phase 6 software chapter review)*
+Introduction: frame the safety context (lightning fatalities in mountains). Draft abstract once both hardware and software chapters are complete.
 
-**Tue Jun 10 — Full document pass**
-Formatting, figure numbering, citations, table of contents, list of figures, abbreviations list.
+**Sun Jun 8 — Literature review and conclusions**
+Literature review: existing weather monitoring systems, BLE sensor nodes, barometric prediction methods. Conclusions: results summary + future work (AS3935 lightning sensor, GPS, mesh networking).
 
-**Wed Jun 11 — Supervisor review and corrections**
-Send draft. Implement all requested changes promptly.
+**Mon Jun 9 — Full document pass + send draft to supervisor**
+Formatting, figure numbering, citations, table of contents, list of figures, abbreviations list. Send complete draft to supervisor today — not Jun 11.
+
+**Tue Jun 10 — Supervisor review window / start corrections**
+Begin implementing any corrections received. Continue if feedback arrives late.
+
+**Wed Jun 11 — Implement remaining corrections**
+Address all supervisor feedback. Final consistency pass.
 
 **Thu Jun 12 — Final proofread and submit**
 Deadline.
