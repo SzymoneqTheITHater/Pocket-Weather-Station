@@ -11,6 +11,7 @@
  * BME280 GND -> ESP32 GND
  * BME280 SCL -> ESP32 D22
  * BME280 SDA -> ESP32 D21
+ * Buzzer (active) -> ESP32 GPIO32
  *
  * ─── SIMULATION MODE ────────────────────────────────────────────────────────
  * Set SIMULATION_MODE to 1 to use fake sensor data instead of real BME280.
@@ -22,13 +23,13 @@
  *   SIMULATION_FAST 0  →  Slow mode: pressure drops gradually over ~30 minutes,
  *                          realistic cycle through all alert levels.
  *   SIMULATION_FAST 1  →  Fast mode: cycles CLEAR → WATCH → WARNING → SEVERE
- *                          every few seconds. Good for testing LEDs and buzzer.
+ *                          every 15 seconds. Good for testing LEDs and buzzer.
  * ────────────────────────────────────────────────────────────────────────────
  */
 
 // ─── SIMULATION FLAGS — edit these to switch modes ───────────────────────────
-#define SIMULATION_MODE  0   // 0 = real sensors,  1 = simulated data
-#define SIMULATION_FAST  0   // 0 = slow/realistic, 1 = fast/testing
+#define SIMULATION_MODE  1   // 0 = real sensors,  1 = simulated data
+#define SIMULATION_FAST  1   // 0 = slow/realistic, 1 = fast/testing
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Wire.h>
@@ -61,7 +62,7 @@ const float WATCH_PRESSURE_DROP      = 1.8;
 unsigned long       lastReadTime  = 0;
 
 #if SIMULATION_FAST == 1
-const unsigned long READ_INTERVAL = 3000;    // 3 seconds — fast testing
+const unsigned long READ_INTERVAL = 15000;   // 15 seconds — fast testing (long enough to see 10 s SEVERE buzzer window expire)
 #else
 const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
 #endif
@@ -71,6 +72,28 @@ enum AlertLevel { CLEAR = 0, WATCH = 1, WARNING = 2, SEVERE = 3 };
 AlertLevel currentAlert = CLEAR;
 
 const char* deviceName = "MountainGuide_Weather";
+
+// ─── LED pins ─────────────────────────────────────────────────────────────────
+const int PIN_LED_GREEN  = 25;
+const int PIN_LED_YELLOW = 26;
+const int PIN_LED_RED    = 27;
+const int PIN_BUZZER     = 32;
+
+const int BAT_PIN        = 34;
+const int BAT_LED_GREEN  = 18;
+const int BAT_LED_YELLOW = 19;
+const int BAT_LED_RED    = 23;
+const float BAT_FULL  = 4.2;
+const float BAT_EMPTY = 3.3;
+
+unsigned long lastBlinkTime = 0;
+bool          blinkState    = false;
+
+// SEVERE buzzer: beeps in sync with red LED for 10 s on each entry into SEVERE,
+// then stays silent until the level leaves SEVERE and returns later.
+const unsigned long SEVERE_BUZZER_DURATION_MS = 10000;
+unsigned long severeBuzzerStartTime = 0;
+bool          buzzerArmed           = false;
 
 // ─── Simulation state ─────────────────────────────────────────────────────────
 #if SIMULATION_MODE == 1
@@ -125,8 +148,13 @@ void getSimulatedReadings(float &temperature, float &pressure, float &humidity) 
     for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1013.0;
     historyFilled = true;
   } else if (simStep % SIM_STEPS == 2) {
-    // WARNING: simulate a 3.1 hPa drop over 3h
+    // WARNING: ~3.1 hPa drop over 3h, but recent 30 min nearly flat
+    // (otherwise the SEVERE branch would fire first on the rapid-drop check).
     for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1012.6;
+    for (int i = 0; i < 6; i++) {
+      int idx = (historyIndex - 6 + i + HISTORY_SIZE) % HISTORY_SIZE;
+      pressureHistory[idx] = 1010.0;
+    }
     historyFilled = true;
   } else if (simStep % SIM_STEPS == 3) {
     // SEVERE: simulate a 1.6 hPa drop over last 30 min
@@ -172,13 +200,22 @@ void getSimulatedReadings(float &temperature, float &pressure, float &humidity) 
 }
 #endif  // SIMULATION_MODE
 
+// ─── LED control ─────────────────────────────────────────────────────────────
+void updateLEDs(AlertLevel alert) {
+  digitalWrite(PIN_LED_GREEN,  alert == CLEAR   ? HIGH : LOW);
+  digitalWrite(PIN_LED_YELLOW, alert == WATCH   ? HIGH : LOW);
+  digitalWrite(PIN_LED_RED,    (alert == WARNING || alert == SEVERE) ? HIGH : LOW);
+}
+
 // ─── Forward declarations ─────────────────────────────────────────────────────
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature);
-void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert);
+void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 void       sendAlertViaBluetooth(AlertLevel alert);
 void       handleCommand(String command);
 String     getAlertName(AlertLevel alert);
-void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert);
+void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
+int        readBatteryPercent();
+void       updateBatteryLEDs(int pct);
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -218,6 +255,18 @@ void setup() {
                   Adafruit_BME280::FILTER_OFF);
 #endif
 
+  pinMode(PIN_LED_GREEN,  OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_RED,    OUTPUT);
+  pinMode(PIN_BUZZER,     OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+  updateLEDs(CLEAR);
+
+  pinMode(BAT_LED_GREEN,  OUTPUT);
+  pinMode(BAT_LED_YELLOW, OUTPUT);
+  pinMode(BAT_LED_RED,    OUTPUT);
+  analogReadResolution(12);
+
   Serial.print("Initializing Bluetooth... ");
   SerialBT.begin(deviceName);
   Serial.println("✓ SUCCESS");
@@ -240,6 +289,33 @@ void setup() {
   SerialBT.println("SYSTEM:READY");
   SerialBT.print("DEVICE:");
   SerialBT.println(deviceName);
+}
+
+// ─── Battery monitoring ──────────────────────────────────────────────────────
+int readBatteryPercent() {
+  long raw = 0;
+  for (int i = 0; i < 16; i++) {
+    raw += analogRead(BAT_PIN);
+    delay(3);
+  }
+  raw /= 16;
+  float vADC = (raw / 4095.0) * 3.3;
+  float vBat = vADC * 2.0;
+  int pct = (int)((vBat - BAT_EMPTY) / (BAT_FULL - BAT_EMPTY) * 100.0);
+  return constrain(pct, 0, 100);
+}
+
+void updateBatteryLEDs(int pct) {
+  digitalWrite(BAT_LED_GREEN,  LOW);
+  digitalWrite(BAT_LED_YELLOW, LOW);
+  digitalWrite(BAT_LED_RED,    LOW);
+  if (pct >= 50) {
+    digitalWrite(BAT_LED_GREEN, HIGH);
+  } else if (pct >= 15) {
+    digitalWrite(BAT_LED_YELLOW, HIGH);
+  } else {
+    digitalWrite(BAT_LED_RED, HIGH);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -274,8 +350,11 @@ void loop() {
     if (historyIndex == 0) historyFilled = true;
 #endif
 
+    int batteryPct = readBatteryPercent();
+    updateBatteryLEDs(batteryPct);
+
     AlertLevel newAlert = analyzeWeatherData(pressure, humidity, temperature);
-    sendDataViaBluetooth(temperature, pressure, humidity, newAlert);
+    sendDataViaBluetooth(temperature, pressure, humidity, newAlert, batteryPct);
 
     if (newAlert != currentAlert) {
       Serial.print("⚠ ALERT LEVEL CHANGED: ");
@@ -283,15 +362,44 @@ void loop() {
       Serial.print(" → ");
       Serial.println(getAlertName(newAlert));
       currentAlert = newAlert;
+      updateLEDs(currentAlert);
       sendAlertViaBluetooth(newAlert);
+
+      if (newAlert == SEVERE) {
+        severeBuzzerStartTime = millis();
+        buzzerArmed = true;
+      } else {
+        buzzerArmed = false;
+        digitalWrite(PIN_BUZZER, LOW);
+      }
     }
 
-    printDebugInfo(temperature, pressure, humidity, newAlert);
+    printDebugInfo(temperature, pressure, humidity, newAlert, batteryPct);
   }
 
   if (SerialBT.available()) {
     String command = SerialBT.readStringUntil('\n');
     handleCommand(command);
+  }
+
+  // SEVERE: blink red LED at 4 Hz (toggle every 125 ms), non-blocking.
+  // Buzzer toggles off the same blinkState while armed (first 10 s of episode).
+  if (currentAlert == SEVERE) {
+    unsigned long now = millis();
+    if (now - lastBlinkTime >= 125) {
+      lastBlinkTime = now;
+      blinkState = !blinkState;
+      digitalWrite(PIN_LED_RED, blinkState ? HIGH : LOW);
+
+      if (buzzerArmed) {
+        if (now - severeBuzzerStartTime < SEVERE_BUZZER_DURATION_MS) {
+          digitalWrite(PIN_BUZZER, blinkState ? HIGH : LOW);
+        } else {
+          buzzerArmed = false;
+          digitalWrite(PIN_BUZZER, LOW);
+        }
+      }
+    }
   }
 
   delay(100);
@@ -324,7 +432,7 @@ AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature)
 }
 
 // ─── Bluetooth output (unchanged) ────────────────────────────────────────────
-void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert) {
+void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
   float pressureDrop3h    = 0;
   float pressureDrop30min = 0;
 
@@ -345,6 +453,7 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
   SerialBT.print(",\"alert\":");      SerialBT.print(alert);
   SerialBT.print(",\"p_drop_3h\":"); SerialBT.print(pressureDrop3h, 2);
   SerialBT.print(",\"p_drop_30m\":"); SerialBT.print(pressureDrop30min, 2);
+  SerialBT.print(",\"bat\":");        SerialBT.print(batteryPct);
   SerialBT.println("}");
 }
 
@@ -372,13 +481,15 @@ void handleCommand(String command) {
     pressure = bme.readPressure() / 100.0F;
     humidity = bme.readHumidity();
 #endif
-    sendDataViaBluetooth(temp, pressure, humidity, currentAlert);
+    sendDataViaBluetooth(temp, pressure, humidity, currentAlert, readBatteryPercent());
     SerialBT.println("STATUS:OK");
   }
   else if (command == "RESET") {
     currentAlert  = CLEAR;
     historyIndex  = 0;
     historyFilled = false;
+    buzzerArmed   = false;
+    digitalWrite(PIN_BUZZER, LOW);
 #if SIMULATION_MODE == 1
     #if SIMULATION_FAST == 1
     simStep = 0;
@@ -435,7 +546,7 @@ String getAlertName(AlertLevel alert) {
   }
 }
 
-void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert) {
+void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
   float pressureDrop3h    = 0;
   float pressureDrop30min = 0;
 
@@ -460,6 +571,7 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
   Serial.print("📊 Temperature:    "); Serial.print(temp, 1);              Serial.println(" °C");
   Serial.print("📊 Pressure:       "); Serial.print(pressure, 1);          Serial.println(" hPa");
   Serial.print("📊 Humidity:       "); Serial.print(humidity, 1);          Serial.println(" %");
+  Serial.print("🔋 Battery:        "); Serial.print(batteryPct);            Serial.println(" %");
   Serial.println("────────────────────────────────────────");
   Serial.print("📉 3h Drop:        "); Serial.print(pressureDrop3h, 2);    Serial.println(" hPa");
   Serial.print("📉 30min Drop:     "); Serial.print(pressureDrop30min, 2); Serial.println(" hPa");
