@@ -53,11 +53,12 @@ float       pressureHistory[HISTORY_SIZE];
 int         historyIndex             = 0;
 bool        historyFilled            = false;
 
-const float PRESSURE_DROP_THRESHOLD  = 3.0;
-const float HUMIDITY_THRESHOLD       = 75.0;
+const float WARNING_PRESSURE_THRESHOLD  = 3.0;
+const float WARNING_HUMIDITY_THRESHOLD       = 75.0;
 const float RAPID_PRESSURE_DROP      = 1.5;
-const float WATCH_PRESSURE_DROP      = 1.8;
-
+const float WATCH_PRESSURE_THRESHOLD     = 1.8;
+const float WATCH_HUMIDITY_THRESHOLD = 70.0;
+const float WATCH_RECENT_DROP        = 1.0;
 // ─── Timing ───────────────────────────────────────────────────────────────────
 unsigned long       lastReadTime  = 0;
 
@@ -294,11 +295,11 @@ void setup() {
 // ─── Battery monitoring ──────────────────────────────────────────────────────
 int readBatteryPercent() {
   long raw = 0;
-  for (int i = 0; i < 16; i++) {
+  for (int i = 0; i < 8; i++) {
     raw += analogRead(BAT_PIN);
-    delay(3);
+    delay(10);
   }
-  raw /= 16;
+  raw /= 8;
   float vADC = (raw / 4095.0) * 3.3;
   float vBat = vADC * 2.0;
   int pct = (int)((vBat - BAT_EMPTY) / (BAT_FULL - BAT_EMPTY) * 100.0);
@@ -419,12 +420,12 @@ AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature)
 
   AlertLevel alert = CLEAR;
 
-  if (pressureDrop30min >= RAPID_PRESSURE_DROP && humidity >= HUMIDITY_THRESHOLD) {
+  if (pressureDrop30min >= RAPID_PRESSURE_DROP && humidity >= WARNING_HUMIDITY_THRESHOLD) {
     alert = SEVERE;
-  } else if (pressureDrop3h >= PRESSURE_DROP_THRESHOLD && humidity >= HUMIDITY_THRESHOLD) {
+  } else if (pressureDrop3h >= WARNING_PRESSURE_THRESHOLD && humidity >= WARNING_HUMIDITY_THRESHOLD) {
     alert = WARNING;
-  } else if (pressureDrop3h >= WATCH_PRESSURE_DROP ||
-             (pressureDrop30min >= 1.0 && humidity >= 70.0)) {
+  } else if (pressureDrop3h >= WATCH_PRESSURE_THRESHOLD ||
+             (pressureDrop30min >= WATCH_RECENT_DROP && humidity >= WATCH_HUMIDITY_THRESHOLD)) {
     alert = WATCH;
   }
 
