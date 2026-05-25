@@ -59,6 +59,22 @@ const float RAPID_PRESSURE_DROP      = 1.5;
 const float WATCH_PRESSURE_THRESHOLD     = 1.8;
 const float WATCH_HUMIDITY_THRESHOLD = 70.0;
 const float WATCH_RECENT_DROP        = 1.0;
+
+// ─── Hysteresis: anti-flapping confirmation counts ───────────────────────────
+// Escalation is immediate; de-escalation requires sustained improvement.
+// This asymmetry is deliberate and safety-critical: a too-eager warning is a
+// harmless false alarm, but a premature "all clear" is dangerous.
+//
+// SIMULATION_FAST bypasses hysteresis (both counts = 1) so the demo can cycle
+// through CLEAR → WATCH → WARNING → SEVERE → CLEAR with one reading per level.
+#if SIMULATION_MODE == 1 && SIMULATION_FAST == 1
+  #define ESCALATE_CONFIRM_COUNT    1
+  #define DEESCALATE_CONFIRM_COUNT  1
+#else
+  #define ESCALATE_CONFIRM_COUNT    1   // raise the level immediately
+  #define DEESCALATE_CONFIRM_COUNT  3   // require 3 consecutive better readings to lower
+#endif
+
 // ─── Timing ───────────────────────────────────────────────────────────────────
 unsigned long       lastReadTime  = 0;
 
@@ -71,6 +87,11 @@ const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
 // ─── Alert levels ─────────────────────────────────────────────────────────────
 enum AlertLevel { CLEAR = 0, WATCH = 1, WARNING = 2, SEVERE = 3 };
 AlertLevel currentAlert = CLEAR;
+
+// Hysteresis state — candidate level awaiting confirmation, and how many
+// consecutive readings have agreed with it. See ESCALATE/DEESCALATE counts.
+AlertLevel pendingAlert = CLEAR;
+int        pendingCount = 0;
 
 const char* deviceName = "MountainGuide_Weather";
 
@@ -357,21 +378,41 @@ void loop() {
     AlertLevel newAlert = analyzeWeatherData(pressure, humidity, temperature);
     sendDataViaBluetooth(temperature, pressure, humidity, newAlert, batteryPct);
 
-    if (newAlert != currentAlert) {
-      Serial.print("⚠ ALERT LEVEL CHANGED: ");
-      Serial.print(getAlertName(currentAlert));
-      Serial.print(" → ");
-      Serial.println(getAlertName(newAlert));
-      currentAlert = newAlert;
-      updateLEDs(currentAlert);
-      sendAlertViaBluetooth(newAlert);
-
-      if (newAlert == SEVERE) {
-        severeBuzzerStartTime = millis();
-        buzzerArmed = true;
+    // Hysteresis: commit a level change only after enough consecutive readings
+    // agree. Escalation uses ESCALATE_CONFIRM_COUNT; de-escalation uses the
+    // larger DEESCALATE_CONFIRM_COUNT. The buzzer only re-arms on a genuine,
+    // confirmed entry into SEVERE — never on flapping.
+    if (newAlert == currentAlert) {
+      // Reading agrees with committed state — clear any pending change.
+      pendingAlert = currentAlert;
+      pendingCount = 0;
+    } else {
+      if (newAlert == pendingAlert) {
+        pendingCount++;
       } else {
-        buzzerArmed = false;
-        digitalWrite(PIN_BUZZER, LOW);
+        pendingAlert = newAlert;
+        pendingCount = 1;
+      }
+      int required = (newAlert > currentAlert)
+                        ? ESCALATE_CONFIRM_COUNT
+                        : DEESCALATE_CONFIRM_COUNT;
+      if (pendingCount >= required) {
+        Serial.print("⚠ ALERT LEVEL CHANGED: ");
+        Serial.print(getAlertName(currentAlert));
+        Serial.print(" → ");
+        Serial.println(getAlertName(pendingAlert));
+        currentAlert = pendingAlert;
+        pendingCount = 0;
+        updateLEDs(currentAlert);
+        sendAlertViaBluetooth(currentAlert);
+
+        if (currentAlert == SEVERE) {
+          severeBuzzerStartTime = millis();
+          buzzerArmed = true;
+        } else {
+          buzzerArmed = false;
+          digitalWrite(PIN_BUZZER, LOW);
+        }
       }
     }
 
@@ -487,6 +528,8 @@ void handleCommand(String command) {
   }
   else if (command == "RESET") {
     currentAlert  = CLEAR;
+    pendingAlert  = CLEAR;
+    pendingCount  = 0;
     historyIndex  = 0;
     historyFilled = false;
     buzzerArmed   = false;
