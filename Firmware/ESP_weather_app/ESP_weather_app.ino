@@ -28,14 +28,15 @@
  */
 
 // ─── SIMULATION FLAGS — edit these to switch modes ───────────────────────────
-#define SIMULATION_MODE  1   // 0 = real sensors,  1 = simulated data
-#define SIMULATION_FAST  1   // 0 = slow/realistic, 1 = fast/testing
+#define SIMULATION_MODE  0   // 0 = real sensors,  1 = simulated data
+#define SIMULATION_FAST  0   // 0 = slow/realistic, 1 = fast/testing
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h> 
 #include <BluetoothSerial.h>
+#include <TinyGPSPlus.h>
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run make menuconfig to enable it
@@ -43,15 +44,24 @@
 
 BluetoothSerial SerialBT;
 
+// ─── GPS (LC76G) — standalone test, NOT used in storm algorithm ─────────────
+TinyGPSPlus gps;
+const unsigned long GPS_PRINT_INTERVAL = 10000;   // print once per second
+unsigned long lastGpsPrint = 0;
+
+TinyGPSCustom vdop(gps, "GNGSA", 17);
+TinyGPSCustom fixType(gps, "GNGSA", 2);   // 1=no fix, 2=2D, 3=3D
+
 // BME280 is always declared so it can remain physically connected in all modes.
 // In simulation mode it is declared but never initialised or read from.
 Adafruit_BME280 bme;
 
 // ─── Storm detection parameters ───────────────────────────────────────────────
-const int   HISTORY_SIZE             = 36;
+const int   HISTORY_SIZE             = 37;
 float       pressureHistory[HISTORY_SIZE];
 int         historyIndex             = 0;
 bool        historyFilled            = false;
+const int   SAMPLES_30MIN            = 6;
 
 const float WARNING_PRESSURE_THRESHOLD  = 3.0;
 const float WARNING_HUMIDITY_THRESHOLD       = 75.0;
@@ -59,13 +69,17 @@ const float RAPID_PRESSURE_DROP      = 1.5;
 const float WATCH_PRESSURE_THRESHOLD     = 1.8;
 const float WATCH_HUMIDITY_THRESHOLD = 70.0;
 const float WATCH_RECENT_DROP        = 1.0;
+const float WARNING_RECENT_DROP      = 1.25;
+
+// ─── Battery global variable (updated every reading) ─────────────────────────────────
+int batteryPct = 100;
 // ─── Timing ───────────────────────────────────────────────────────────────────
 unsigned long       lastReadTime  = 0;
 
 #if SIMULATION_FAST == 1
 const unsigned long READ_INTERVAL = 15000;   // 15 seconds — fast testing (long enough to see 10 s SEVERE buzzer window expire)
 #else
-const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
+const unsigned long READ_INTERVAL = 30000;  // 5 minutes — normal / slow sim
 #endif
 
 // ─── Alert levels ─────────────────────────────────────────────────────────────
@@ -149,22 +163,18 @@ void getSimulatedReadings(float &temperature, float &pressure, float &humidity) 
     for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1013.0;
     historyFilled = true;
   } else if (simStep % SIM_STEPS == 2) {
-    // WARNING: ~3.1 hPa drop over 3h, but recent 30 min nearly flat
-    // (otherwise the SEVERE branch would fire first on the rapid-drop check).
+     // WARNING: big 3h drop, but recent 30-min window nearly flat (so SEVERE doesn't fire)
     for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1012.6;
-    for (int i = 0; i < 6; i++) {
-      int idx = (historyIndex - 6 + i + HISTORY_SIZE) % HISTORY_SIZE;
-      pressureHistory[idx] = 1010.0;
-    }
+    int cur   = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    int idx30 = (cur - SAMPLES_30MIN + HISTORY_SIZE) % HISTORY_SIZE;
+    pressureHistory[idx30] = 1010.0;   // 30-min drop ~0.5 hPa vs current 1009.5
     historyFilled = true;
   } else if (simStep % SIM_STEPS == 3) {
-    // SEVERE: simulate a 1.6 hPa drop over last 30 min
+      // SEVERE: rapid 30-min drop
     for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1012.6;
-    // Set recent 6 readings (last 30 min) to a higher value
-    for (int i = 0; i < 6; i++) {
-      int idx = (historyIndex - 6 + i + HISTORY_SIZE) % HISTORY_SIZE;
-      pressureHistory[idx] = 1009.6;
-    }
+    int cur   = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    int idx30 = (cur - SAMPLES_30MIN + HISTORY_SIZE) % HISTORY_SIZE;
+    pressureHistory[idx30] = 1009.6;   // 30-min drop ~1.6 hPa vs current 1008
     historyFilled = true;
   }
   simStep++;
@@ -210,6 +220,7 @@ void updateLEDs(AlertLevel alert) {
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature);
+void       computeDrops(float pressure, float &drop3h, float &drop30min);
 void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 void       sendAlertViaBluetooth(AlertLevel alert);
 void       handleCommand(String command);
@@ -217,16 +228,21 @@ String     getAlertName(AlertLevel alert);
 void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 int        readBatteryPercent();
 void       updateBatteryLEDs(int pct);
+void       setupGPS();
+void       updateGPS();
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
+
   Serial.println("\n╔════════════════════════════════════════════╗");
   Serial.println("║  MOUNTAIN GUIDE WEATHER MONITORING SYSTEM  ║");
   Serial.println("║       Thunderstorm Detection v1.1          ║");
   Serial.println("╚════════════════════════════════════════════╝\n");
+
+  setupGPS();
 
 #if SIMULATION_MODE == 1
   Serial.println("*** SIMULATION MODE ACTIVE ***");
@@ -292,35 +308,10 @@ void setup() {
   SerialBT.println(deviceName);
 }
 
-// ─── Battery monitoring ──────────────────────────────────────────────────────
-int readBatteryPercent() {
-  long raw = 0;
-  for (int i = 0; i < 8; i++) {
-    raw += analogRead(BAT_PIN);
-    delay(10);
-  }
-  raw /= 8;
-  float vADC = (raw / 4095.0) * 3.3;
-  float vBat = vADC * 2.0;
-  int pct = (int)((vBat - BAT_EMPTY) / (BAT_FULL - BAT_EMPTY) * 100.0);
-  return constrain(pct, 0, 100);
-}
-
-void updateBatteryLEDs(int pct) {
-  digitalWrite(BAT_LED_GREEN,  LOW);
-  digitalWrite(BAT_LED_YELLOW, LOW);
-  digitalWrite(BAT_LED_RED,    LOW);
-  if (pct >= 50) {
-    digitalWrite(BAT_LED_GREEN, HIGH);
-  } else if (pct >= 15) {
-    digitalWrite(BAT_LED_YELLOW, HIGH);
-  } else {
-    digitalWrite(BAT_LED_RED, HIGH);
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
+updateGPS();
+
   unsigned long currentTime = millis();
 
   if (currentTime - lastReadTime >= READ_INTERVAL || lastReadTime == 0) {
@@ -351,7 +342,7 @@ void loop() {
     if (historyIndex == 0) historyFilled = true;
 #endif
 
-    int batteryPct = readBatteryPercent();
+    batteryPct = readBatteryPercent();
     updateBatteryLEDs(batteryPct);
 
     AlertLevel newAlert = analyzeWeatherData(pressure, humidity, temperature);
@@ -408,44 +399,49 @@ void loop() {
 
 // ─── Algorithm (unchanged) ────────────────────────────────────────────────────
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature) {
-  if (!historyFilled && historyIndex < 6) return CLEAR;
-
-  int oldestIndex = historyFilled ? historyIndex : 0;
-  float pressureDrop3h = pressureHistory[oldestIndex] - pressure;
-
-  int recentStart = historyIndex - 6;
-  if (recentStart < 0) recentStart += HISTORY_SIZE;
-  if (!historyFilled && historyIndex < 6) recentStart = 0;
-  float pressureDrop30min = pressureHistory[recentStart] - pressure;
+  
+  float pressureDrop3h, pressureDrop30min;
+  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
 
   AlertLevel alert = CLEAR;
 
   if (pressureDrop30min >= RAPID_PRESSURE_DROP && humidity >= WARNING_HUMIDITY_THRESHOLD) {
     alert = SEVERE;
-  } else if (pressureDrop3h >= WARNING_PRESSURE_THRESHOLD && humidity >= WARNING_HUMIDITY_THRESHOLD) {
+  } else if ((pressureDrop3h >= WARNING_PRESSURE_THRESHOLD || pressureDrop30min >= WARNING_RECENT_DROP) &&
+            humidity >= WARNING_HUMIDITY_THRESHOLD) {
     alert = WARNING;
   } else if (pressureDrop3h >= WATCH_PRESSURE_THRESHOLD ||
-             (pressureDrop30min >= WATCH_RECENT_DROP && humidity >= WATCH_HUMIDITY_THRESHOLD)) {
+            (pressureDrop30min >= WATCH_RECENT_DROP && humidity >= WATCH_HUMIDITY_THRESHOLD)) {
     alert = WATCH;
   }
 
   return alert;
 }
 
+void computeDrops(float pressure, float &drop3h, float &drop30min) {
+  drop3h    = 0.0;
+  drop30min = 0.0;
+
+  // Most recent sample: historyIndex was already advanced past it in loop().
+  int cur = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+
+  // 30-minute drop: valid once SAMPLES_30MIN intervals exist (= SAMPLES_30MIN + 1 samples).
+  if (historyFilled || historyIndex >= SAMPLES_30MIN + 1) {
+    int idx30 = (cur - SAMPLES_30MIN + HISTORY_SIZE) % HISTORY_SIZE;
+    drop30min = pressureHistory[idx30] - pressure;
+  }
+
+  // 3-hour drop: only meaningful once the buffer holds a full window.
+  // With HISTORY_SIZE = 36 and 5-min samples this span is ~175 min; use 37 for a true 180.
+  if (historyFilled) {
+    drop3h = pressureHistory[historyIndex] - pressure;  // historyIndex now points at the oldest sample
+  }
+}
 // ─── Bluetooth output (unchanged) ────────────────────────────────────────────
 void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
-  float pressureDrop3h    = 0;
-  float pressureDrop30min = 0;
-
-  if (historyFilled || historyIndex >= 6) {
-    int oldestIndex = historyFilled ? historyIndex : 0;
-    pressureDrop3h = pressureHistory[oldestIndex] - pressure;
-
-    int recentStart = historyIndex - 6;
-    if (recentStart < 0) recentStart += HISTORY_SIZE;
-    if (!historyFilled && historyIndex < 6) recentStart = 0;
-    pressureDrop30min = pressureHistory[recentStart] - pressure;
-  }
+  
+  float pressureDrop3h, pressureDrop30min;
+  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
 
   SerialBT.print("DATA:{");
   SerialBT.print("\"temp\":");        SerialBT.print(temp, 1);
@@ -482,7 +478,7 @@ void handleCommand(String command) {
     pressure = bme.readPressure() / 100.0F;
     humidity = bme.readHumidity();
 #endif
-    sendDataViaBluetooth(temp, pressure, humidity, currentAlert, readBatteryPercent());
+    sendDataViaBluetooth(temp, pressure, humidity, currentAlert, batteryPct); //readBatteryPercent(); zamiast batteryPct
     SerialBT.println("STATUS:OK");
   }
   else if (command == "RESET") {
@@ -548,18 +544,8 @@ String getAlertName(AlertLevel alert) {
 }
 
 void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
-  float pressureDrop3h    = 0;
-  float pressureDrop30min = 0;
-
-  if (historyFilled || historyIndex >= 6) {
-    int oldestIndex = historyFilled ? historyIndex : 0;
-    pressureDrop3h = pressureHistory[oldestIndex] - pressure;
-
-    int recentStart = historyIndex - 6;
-    if (recentStart < 0) recentStart += HISTORY_SIZE;
-    if (!historyFilled && historyIndex < 6) recentStart = 0;
-    pressureDrop30min = pressureHistory[recentStart] - pressure;
-  }
+  float pressureDrop3h, pressureDrop30min;
+  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
 
   Serial.println("════════════════════════════════════════");
 #if SIMULATION_MODE == 1
@@ -570,7 +556,7 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
   #endif
 #endif
   Serial.print("📊 Temperature:    "); Serial.print(temp, 1);              Serial.println(" °C");
-  Serial.print("📊 Pressure:       "); Serial.print(pressure, 1);          Serial.println(" hPa");
+  Serial.print("📊 Pressure:       "); Serial.print(pressure, 2);          Serial.println(" hPa");
   Serial.print("📊 Humidity:       "); Serial.print(humidity, 1);          Serial.println(" %");
   Serial.print("🔋 Battery:        "); Serial.print(batteryPct);            Serial.println(" %");
   Serial.println("────────────────────────────────────────");
@@ -588,4 +574,88 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
     case SEVERE:  Serial.println("🚨 SEVERE");  break;
   }
   Serial.println("════════════════════════════════════════\n");
+}
+
+// ─── Battery monitoring ──────────────────────────────────────────────────────
+int readBatteryPercent() {
+  long raw = 0;
+  for (int i = 0; i < 8; i++) {
+    raw += analogRead(BAT_PIN);
+    delay(10);
+  }
+  raw /= 8;
+  float vADC = (raw / 4095.0) * 3.3;
+  float vBat = vADC * 2.0;
+  int pct = (int)((vBat - BAT_EMPTY) / (BAT_FULL - BAT_EMPTY) * 100.0);
+  return constrain(pct, 0, 100);
+}
+
+void updateBatteryLEDs(int pct) {
+  digitalWrite(BAT_LED_GREEN,  LOW);
+  digitalWrite(BAT_LED_YELLOW, LOW);
+  digitalWrite(BAT_LED_RED,    LOW);
+  if (pct >= 50) {
+    digitalWrite(BAT_LED_GREEN, HIGH);
+  } else if (pct >= 15) {
+    digitalWrite(BAT_LED_YELLOW, HIGH);
+  } else {
+    digitalWrite(BAT_LED_RED, HIGH);
+  }
+}
+
+void setupGPS() {
+  Serial2.setRxBufferSize(1024);                 // headroom for NMEA bursts
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);       // RX=16, TX=17, LC76G default baud
+  Serial.println("GPS (LC76G) initialised on UART2 @ 115200 baud");
+}
+
+void updateGPS() {
+  // Feed every available byte to the parser, continuously
+  while (Serial2.available() > 0) {
+    gps.encode(Serial2.read());
+  }
+
+  // Print a summary once per second
+  if (millis() - lastGpsPrint >= GPS_PRINT_INTERVAL) {
+    lastGpsPrint = millis();
+
+    Serial.println("──────── GPS READING ────────");
+
+    if (gps.location.isValid()) {
+      Serial.print("Latitude:   "); Serial.println(gps.location.lat(), 6);
+      Serial.print("Longitude:  "); Serial.println(gps.location.lng(), 6);
+    } else {
+      Serial.println("Location:   --- (no fix yet)");
+    }
+
+    if (gps.altitude.isValid()) {
+      Serial.print("Altitude:   "); Serial.print(gps.altitude.meters(), 1);
+      Serial.println(" m (above sea level)");
+    } else {
+      Serial.println("Altitude:   --- (no fix yet)");
+    }
+
+    if (gps.satellites.isValid()) {
+      Serial.print("Satellites: "); Serial.println(gps.satellites.value());
+    }
+    if (gps.hdop.isValid()) {
+      Serial.print("HDOP:       "); Serial.println(gps.hdop.hdop(), 2);
+    }
+
+    if (vdop.isValid()) {
+      Serial.print("VDOP:       "); Serial.println(vdop.value());
+    }
+
+    if (fixType.isValid()) {
+      Serial.print("Fix type:   "); Serial.print(fixType.value());
+      Serial.println("  (1=none, 2=2D, 3=3D)");
+    }
+
+    // Sanity check: warn if nothing is arriving after 100 s
+    if (millis() > 100000 && gps.charsProcessed() < 10) {
+      Serial.println("WARNING: no GPS data — check TX/RX wiring and baud rate.");
+    }
+
+    Serial.println();
+  }
 }
