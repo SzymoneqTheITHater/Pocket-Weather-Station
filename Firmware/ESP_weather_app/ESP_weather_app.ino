@@ -46,7 +46,7 @@ BluetoothSerial SerialBT;
 
 // ─── GPS (LC76G) — standalone test, NOT used in storm algorithm ─────────────
 TinyGPSPlus gps;
-const unsigned long GPS_PRINT_INTERVAL = 10000;   // print once per second
+const unsigned long GPS_PRINT_INTERVAL = 100000;   // print once per second (added 2 0 so 100s)
 unsigned long lastGpsPrint = 0;
 
 TinyGPSCustom vdop(gps, "GNGSA", 17);
@@ -79,7 +79,7 @@ unsigned long       lastReadTime  = 0;
 #if SIMULATION_FAST == 1
 const unsigned long READ_INTERVAL = 15000;   // 15 seconds — fast testing (long enough to see 10 s SEVERE buzzer window expire)
 #else
-const unsigned long READ_INTERVAL = 30000;  // 5 minutes — normal / slow sim
+const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
 #endif
 
 // ─── Alert levels ─────────────────────────────────────────────────────────────
