@@ -1,6 +1,6 @@
 /*
  * THUNDERSTORM DETECTION SYSTEM
- * For Mountain Guide Safety - Engineering Thesis Part 1
+ * For Mountain Guide Safety - Engineering Thesis
  *
  * Hardware:
  * - ESP32-WROOM-32 DevKit
@@ -13,6 +13,17 @@
  * BME280 SDA -> ESP32 D21
  * Buzzer (active) -> ESP32 GPIO32
  *
+ * ─── CONNECTIVITY (BLE / NimBLE-Arduino) ─────────────────────────────────────
+ * The device is a BLE GATT peripheral advertising as "MountainGuide_Weather".
+ * It exposes ONE custom service containing ONE DATA characteristic with the
+ * READ + NOTIFY properties. The characteristic value is the current-reading
+ * JSON (same fields as before). Each measurement cycle the firmware updates
+ * the value and fires a notify; subscribed phones receive it instantly.
+ * The phone can also READ the characteristic on connect for an immediate value
+ * without waiting for the next cycle.
+ *
+ * Requires the "NimBLE-Arduino" library (v2.x) installed via Library Manager.
+ *
  * ─── SIMULATION MODE ────────────────────────────────────────────────────────
  * Set SIMULATION_MODE to 1 to use fake sensor data instead of real BME280.
  * The BME280 can remain physically connected in simulation mode — it is simply
@@ -23,7 +34,8 @@
  *   SIMULATION_FAST 0  →  Slow mode: pressure drops gradually over ~30 minutes,
  *                          realistic cycle through all alert levels.
  *   SIMULATION_FAST 1  →  Fast mode: cycles CLEAR → WATCH → WARNING → SEVERE
- *                          every 15 seconds. Good for testing LEDs and buzzer.
+ *                          every 15 seconds. Good for testing LEDs, buzzer,
+ *                          and the BLE notify stream.
  * ────────────────────────────────────────────────────────────────────────────
  */
 
@@ -34,19 +46,27 @@
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
-#include <Adafruit_BME280.h> 
-#include <BluetoothSerial.h>
+#include <Adafruit_BME280.h>
+#include <NimBLEDevice.h>
 #include <TinyGPSPlus.h>
+#include "esp_timer.h"
 
-#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
-#error Bluetooth is not enabled! Please run make menuconfig to enable it
-#endif
+// ─── BLE (NimBLE) ────────────────────────────────────────────────────────────
+// Custom 128-bit UUIDs for this project's service + characteristic.
+// (Any unique 128-bit UUIDs would work; these are fixed for this device.)
+// The app will use DATA_CHAR_UUID to read/subscribe to live readings.
+static const char* SERVICE_UUID   = "5b3e1f00-1c2d-4e3a-9b6f-0a1b2c3d4e5f";
+static const char* DATA_CHAR_UUID = "5b3e1f01-1c2d-4e3a-9b6f-0a1b2c3d4e5f";
+// Reserved for a future history feature (NOT implemented yet). Adding it later
+// is purely additive — clients discover characteristics dynamically, so the
+// MVP app keeps working unchanged when this is introduced.
+// static const char* HISTORY_CHAR_UUID = "5b3e1f02-1c2d-4e3a-9b6f-0a1b2c3d4e5f";
 
-BluetoothSerial SerialBT;
+NimBLECharacteristic* pDataChar = nullptr;
 
 // ─── GPS (LC76G) — standalone test, NOT used in storm algorithm ─────────────
 TinyGPSPlus gps;
-const unsigned long GPS_PRINT_INTERVAL = 100000;   // print once per second (added 2 0 so 100s)
+const unsigned long GPS_PRINT_INTERVAL = 100000;   // print once per 100 s
 unsigned long lastGpsPrint = 0;
 
 TinyGPSCustom vdop(gps, "GNGSA", 17);
@@ -222,8 +242,6 @@ void updateLEDs(AlertLevel alert) {
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature);
 void       computeDrops(float pressure, float &drop3h, float &drop30min);
 void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
-void       sendAlertViaBluetooth(AlertLevel alert);
-void       handleCommand(String command);
 String     getAlertName(AlertLevel alert);
 void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 int        readBatteryPercent();
@@ -239,7 +257,7 @@ void setup() {
 
   Serial.println("\n╔════════════════════════════════════════════╗");
   Serial.println("║  MOUNTAIN GUIDE WEATHER MONITORING SYSTEM  ║");
-  Serial.println("║       Thunderstorm Detection v1.1          ║");
+  Serial.println("║     Thunderstorm Detection v2.0 (BLE)      ║");
   Serial.println("╚════════════════════════════════════════════╝\n");
 
   setupGPS();
@@ -247,7 +265,7 @@ void setup() {
 #if SIMULATION_MODE == 1
   Serial.println("*** SIMULATION MODE ACTIVE ***");
   #if SIMULATION_FAST == 1
-  Serial.println("*** FAST: cycling alert levels every 3 seconds ***\n");
+  Serial.println("*** FAST: cycling alert levels every 15 seconds ***\n");
   #else
   Serial.println("*** SLOW: realistic pressure drop over ~30 minutes ***\n");
   #endif
@@ -284,12 +302,29 @@ void setup() {
   pinMode(BAT_LED_RED,    OUTPUT);
   analogReadResolution(12);
 
-  Serial.print("Initializing Bluetooth... ");
-  SerialBT.begin(deviceName);
+  // ─── BLE init (NimBLE GATT peripheral) ──────────────────────────────────────
+  Serial.print("Initializing BLE... ");
+  NimBLEDevice::init(deviceName);
+  NimBLEDevice::setMTU(247);   // allow notifications big enough for the JSON payload
+
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  pServer->advertiseOnDisconnect(true);   // auto re-advertise after a phone disconnects
+
+  NimBLEService* pService = pServer->createService(SERVICE_UUID);
+  pDataChar = pService->createCharacteristic(
+      DATA_CHAR_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+  );
+  pDataChar->setValue("{}");   // placeholder until the first reading populates it
+  pService->start();
+
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->setName(deviceName);   // NimBLE 2.x: the name must be set explicitly to be advertised
+  pAdvertising->start();
+
   Serial.println("✓ SUCCESS");
-  Serial.print("Device name: ");
+  Serial.print("Advertising as: ");
   Serial.println(deviceName);
-  Serial.println("Waiting for phone connection...");
 
 #if SIMULATION_MODE == 0
   bme.takeForcedMeasurement();
@@ -302,10 +337,6 @@ void setup() {
 
   Serial.println("\n✓ System initialized successfully!");
   Serial.println("Starting atmospheric monitoring...\n");
-
-  SerialBT.println("SYSTEM:READY");
-  SerialBT.print("DEVICE:");
-  SerialBT.println(deviceName);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -329,7 +360,6 @@ updateGPS();
 
     if (isnan(temperature) || isnan(pressure) || isnan(humidity)) {
       Serial.println("❌ ERROR: Invalid sensor readings!");
-      SerialBT.println("ERROR:SENSOR:Invalid readings");
       return;
     }
 #endif
@@ -355,7 +385,6 @@ updateGPS();
       Serial.println(getAlertName(newAlert));
       currentAlert = newAlert;
       updateLEDs(currentAlert);
-      sendAlertViaBluetooth(newAlert);
 
       if (newAlert == SEVERE) {
         severeBuzzerStartTime = millis();
@@ -367,11 +396,6 @@ updateGPS();
     }
 
     printDebugInfo(temperature, pressure, humidity, newAlert, batteryPct);
-  }
-
-  if (SerialBT.available()) {
-    String command = SerialBT.readStringUntil('\n');
-    handleCommand(command);
   }
 
   // SEVERE: blink red LED at 4 Hz (toggle every 125 ms), non-blocking.
@@ -437,99 +461,33 @@ void computeDrops(float pressure, float &drop3h, float &drop30min) {
     drop3h = pressureHistory[historyIndex] - pressure;  // historyIndex now points at the oldest sample
   }
 }
-// ─── Bluetooth output (unchanged) ────────────────────────────────────────────
+
+// ─── BLE output ──────────────────────────────────────────────────────────────
+// Builds the current-reading JSON (same fields as the old DATA: line) and
+// publishes it: sets the DATA characteristic value (so a fresh READ returns it)
+// and fires a notify to any subscribed phone.
 void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
-  
+
   float pressureDrop3h, pressureDrop30min;
   computeDrops(pressure, pressureDrop3h, pressureDrop30min);
 
-  SerialBT.print("DATA:{");
-  SerialBT.print("\"temp\":");        SerialBT.print(temp, 1);
-  SerialBT.print(",\"pressure\":");   SerialBT.print(pressure, 1);
-  SerialBT.print(",\"humidity\":");   SerialBT.print(humidity, 1);
-  SerialBT.print(",\"alert\":");      SerialBT.print(alert);
-  SerialBT.print(",\"p_drop_3h\":"); SerialBT.print(pressureDrop3h, 2);
-  SerialBT.print(",\"p_drop_30m\":"); SerialBT.print(pressureDrop30min, 2);
-  SerialBT.print(",\"bat\":");        SerialBT.print(batteryPct);
-  SerialBT.println("}");
-}
+  // Device uptime in seconds (rollover-proof: esp_timer is 64-bit microseconds).
+  uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
 
-void sendAlertViaBluetooth(AlertLevel alert) {
-  SerialBT.print("ALERT:");
-  switch (alert) {
-    case CLEAR:   SerialBT.println("CLEAR:Weather conditions stable and safe"); break;
-    case WATCH:   SerialBT.println("WATCH:Weather changing - monitor conditions closely"); break;
-    case WARNING: SerialBT.println("WARNING:Thunderstorm likely within 1-2 hours - prepare to descend"); break;
-    case SEVERE:  SerialBT.println("SEVERE:Thunderstorm imminent - seek shelter immediately!"); break;
-  }
-}
+  char json[176];
+  snprintf(json, sizeof(json),
+    "{\"temp\":%.1f,\"pressure\":%.1f,\"humidity\":%.1f,\"alert\":%d,"
+    "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,\"bat\":%d,\"up_s\":%lu}",
+    temp, pressure, humidity, (int)alert, pressureDrop3h, pressureDrop30min, batteryPct,
+    (unsigned long)uptimeSec);
 
-// ─── Command handler (unchanged) ─────────────────────────────────────────────
-void handleCommand(String command) {
-  command.trim();
+  if (pDataChar != nullptr) {
+    pDataChar->setValue((uint8_t*)json, strlen(json));
+    pDataChar->notify();
+  }
 
-  if (command == "STATUS") {
-    float temp, pressure, humidity;
-#if SIMULATION_MODE == 1
-    getSimulatedReadings(temp, pressure, humidity);
-#else
-    bme.takeForcedMeasurement();
-    temp     = bme.readTemperature();
-    pressure = bme.readPressure() / 100.0F;
-    humidity = bme.readHumidity();
-#endif
-    sendDataViaBluetooth(temp, pressure, humidity, currentAlert, batteryPct); //readBatteryPercent(); zamiast batteryPct
-    SerialBT.println("STATUS:OK");
-  }
-  else if (command == "RESET") {
-    currentAlert  = CLEAR;
-    historyIndex  = 0;
-    historyFilled = false;
-    buzzerArmed   = false;
-    digitalWrite(PIN_BUZZER, LOW);
-#if SIMULATION_MODE == 1
-    #if SIMULATION_FAST == 1
-    simStep = 0;
-    #else
-    simPressure     = 1013.0;
-    simHumidity     = 60.0;
-    simTemperature  = 18.0;
-    simTickCount    = 0;
-    #endif
-    for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = 1013.0;
-#else
-    bme.takeForcedMeasurement();
-    float currentPressure = bme.readPressure() / 100.0F;
-    for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = currentPressure;
-#endif
-    SerialBT.println("SYSTEM:RESET_COMPLETE");
-    Serial.println("System reset by phone command");
-  }
-  else if (command == "PING") {
-    SerialBT.println("SYSTEM:PONG");
-  }
-  else if (command == "INFO") {
-    SerialBT.print("SYSTEM:VERSION:1.1");
-#if SIMULATION_MODE == 1
-    SerialBT.print(",MODE:SIMULATION");
-    #if SIMULATION_FAST == 1
-    SerialBT.print("_FAST");
-    #else
-    SerialBT.print("_SLOW");
-    #endif
-#else
-    SerialBT.print(",MODE:LIVE");
-#endif
-    SerialBT.print(",INTERVAL:");
-    SerialBT.print(READ_INTERVAL / 1000);
-    SerialBT.print("s,HISTORY:");
-    SerialBT.print(historyFilled ? HISTORY_SIZE : historyIndex);
-    SerialBT.println(" samples");
-  }
-  else {
-    SerialBT.print("ERROR:UNKNOWN_COMMAND:");
-    SerialBT.println(command);
-  }
+  Serial.print("BLE DATA: ");
+  Serial.println(json);
 }
 
 // ─── Helpers (unchanged) ─────────────────────────────────────────────────────
@@ -615,7 +573,7 @@ void updateGPS() {
     gps.encode(Serial2.read());
   }
 
-  // Print a summary once per second
+  // Print a summary once per interval
   if (millis() - lastGpsPrint >= GPS_PRINT_INTERVAL) {
     lastGpsPrint = millis();
 
