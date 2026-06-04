@@ -40,8 +40,8 @@
  */
 
 // ─── SIMULATION FLAGS — edit these to switch modes ───────────────────────────
-#define SIMULATION_MODE  0   // 0 = real sensors,  1 = simulated data
-#define SIMULATION_FAST  0   // 0 = slow/realistic, 1 = fast/testing
+#define SIMULATION_MODE  1   // 0 = real sensors,  1 = simulated data
+#define SIMULATION_FAST  1   // 0 = slow/realistic, 1 = fast/testing
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Wire.h>
@@ -66,7 +66,7 @@ NimBLECharacteristic* pDataChar = nullptr;
 
 // ─── GPS (LC76G) — standalone test, NOT used in storm algorithm ─────────────
 TinyGPSPlus gps;
-const unsigned long GPS_PRINT_INTERVAL = 100000;   // print once per 100 s
+const unsigned long GPS_PRINT_INTERVAL = 10000;   // print once per 100 s
 unsigned long lastGpsPrint = 0;
 
 TinyGPSCustom vdop(gps, "GNGSA", 17);
@@ -316,6 +316,8 @@ void setup() {
       NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
   pDataChar->setValue("{}");   // placeholder until the first reading populates it
+  NimBLEDescriptor* pDesc = pDataChar->createDescriptor("2901", NIMBLE_PROPERTY::READ, 32);
+  pDesc->setValue("Pocket_Weather_Station_Data(JSON)");
   pService->start();
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
@@ -476,7 +478,7 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
 
   char json[176];
   snprintf(json, sizeof(json),
-    "{\"temp\":%.1f,\"pressure\":%.1f,\"humidity\":%.1f,\"alert\":%d,"
+    "{\"temp\":%.1f,\"pressure\":%.2f,\"humidity\":%.1f,\"alert\":%d,"
     "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,\"bat\":%d,\"up_s\":%lu}",
     temp, pressure, humidity, (int)alert, pressureDrop3h, pressureDrop30min, batteryPct,
     (unsigned long)uptimeSec);
