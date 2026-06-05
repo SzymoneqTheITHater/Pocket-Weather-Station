@@ -66,7 +66,7 @@ NimBLECharacteristic* pDataChar = nullptr;
 
 // ─── GPS (LC76G) — standalone test, NOT used in storm algorithm ─────────────
 TinyGPSPlus gps;
-const unsigned long GPS_PRINT_INTERVAL = 10000;   // print once per 100 s
+const unsigned long GPS_PRINT_INTERVAL = 100000;   // print once per 100 s
 unsigned long lastGpsPrint = 0;
 
 TinyGPSCustom vdop(gps, "GNGSA", 17);
@@ -90,6 +90,22 @@ const float WATCH_PRESSURE_THRESHOLD     = 1.8;
 const float WATCH_HUMIDITY_THRESHOLD = 70.0;
 const float WATCH_RECENT_DROP        = 1.0;
 const float WARNING_RECENT_DROP      = 1.25;
+
+// ─── Altitude-pressure correction (Stage 4, option B) ────────────────────────
+// GPS altitude lets us subtract the pressure change caused by the guide moving
+// up/down, leaving only the weather-driven component. The per-metre coefficient
+// is (P*g)/(R*T) — NOT a constant: it shrinks with altitude as P falls
+//   ~0.120 hPa/m at sea level, ~0.104 at 1500 m, ~0.089 at 3000 m.
+// P and T here are the LIVE BME280 readings, so the coefficient is automatically
+// "at this specific altitude" without any lookup table.
+const float GRAVITY        = 9.80665;   // m/s^2
+const float R_DRY_AIR      = 287.05;    // J/(kg·K), specific gas constant, dry air
+
+float  altitudeHistory[HISTORY_SIZE];   // parallel to pressureHistory; NAN = no fix
+float  lastValidAltitude = NAN;         // metres MSL, NAN until first valid fix
+double lastValidLat      = 0.0;
+double lastValidLng      = 0.0;
+bool   gpsHasFix         = false;
 
 // ─── Battery global variable (updated every reading) ─────────────────────────────────
 int batteryPct = 100;
@@ -241,6 +257,11 @@ void updateLEDs(AlertLevel alert) {
 // ─── Forward declarations ─────────────────────────────────────────────────────
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature);
 void       computeDrops(float pressure, float &drop3h, float &drop30min);
+float      pressurePerMeter(float pressure_hPa, float temp_C);
+void       computeCorrectedDrops(float pressure, float temperature,
+                                 float &rawDrop3h, float &rawDrop30min,
+                                 float &corrDrop3h, float &corrDrop30min,
+                                 bool &applied3h, bool &applied30m);
 void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 String     getAlertName(AlertLevel alert);
 void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
@@ -329,6 +350,31 @@ void setup() {
   Serial.println(deviceName);
 
 #if SIMULATION_MODE == 0
+  // Wait for the first viable altitude fix before sampling begins, for as long
+  // as it takes. Every stored sample is therefore born with a real altitude, so
+  // no backfill is needed. NOTE: if a fix is never acquired (e.g. no sky view or
+  // a wiring/antenna fault) the device waits here indefinitely and never starts
+  // monitoring — a deliberate choice to guarantee altitude-paired data, at the
+  // cost of the standalone pressure-only fallback.
+  Serial.println("Waiting for first GPS fix (will wait as long as needed)...");
+  unsigned long gpsWaitStart = millis();
+  unsigned long lastWaitPrint = 0;
+  while (!gpsHasFix) {
+    updateGPS();                                   // keeps parsing NMEA; sets gpsHasFix
+    if (millis() - lastWaitPrint >= 5000) {        // heartbeat so the monitor shows life
+      lastWaitPrint = millis();
+      Serial.print("  ...still waiting for GPS fix (");
+      Serial.print((millis() - gpsWaitStart) / 1000);
+      Serial.println(" s)");
+    }
+    delay(50);                                     // yields to BLE + idle/WDT task
+  }
+  Serial.print("✓ GPS fix acquired after ");
+  Serial.print((millis() - gpsWaitStart) / 1000);
+  Serial.println(" s — starting measurements.");
+#endif
+
+#if SIMULATION_MODE == 0
   bme.takeForcedMeasurement();
   float initialPressure = bme.readPressure() / 100.0F;
 #else
@@ -336,6 +382,7 @@ void setup() {
 #endif
 
   for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = initialPressure;
+  for (int i = 0; i < HISTORY_SIZE; i++) altitudeHistory[i] = NAN;  // filled once GPS has a fix
 
   Serial.println("\n✓ System initialized successfully!");
   Serial.println("Starting atmospheric monitoring...\n");
@@ -370,6 +417,7 @@ updateGPS();
     // In all other modes, update history normally
 #if !(SIMULATION_MODE == 1 && SIMULATION_FAST == 1)
     pressureHistory[historyIndex] = pressure;
+    altitudeHistory[historyIndex] = lastValidAltitude;  // NAN if no fix → correction skips this window
     historyIndex = (historyIndex + 1) % HISTORY_SIZE;
     if (historyIndex == 0) historyFilled = true;
 #endif
@@ -423,11 +471,18 @@ updateGPS();
   delay(100);
 }
 
-// ─── Algorithm (unchanged) ────────────────────────────────────────────────────
+// ─── Algorithm (now altitude-aware) ──────────────────────────────────────────
+// Thresholds are unchanged and still physically meaningful. What changed: the
+// drops fed into them are CORRECTED for elevation change, so climbing/descending
+// no longer masquerades as a weather pressure trend.
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature) {
-  
-  float pressureDrop3h, pressureDrop30min;
-  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
+
+  float rawDrop3h, rawDrop30min, pressureDrop3h, pressureDrop30min;
+  bool  applied3h, applied30m;
+  computeCorrectedDrops(pressure, temperature,
+                        rawDrop3h, rawDrop30min,
+                        pressureDrop3h, pressureDrop30min,
+                        applied3h, applied30m);
 
   AlertLevel alert = CLEAR;
 
@@ -464,24 +519,94 @@ void computeDrops(float pressure, float &drop3h, float &drop30min) {
   }
 }
 
+// ─── Altitude correction helpers (Stage 4, option B) ─────────────────────────
+// Local pressure lapse with height, in hPa per metre, AT THE CURRENT STATE.
+// Because pressure_hPa is the live BME280 reading, this value is automatically
+// correct for whatever altitude the device is at — it falls from ~0.120 near
+// sea level toward ~0.089 at 3000 m without any tables.
+float pressurePerMeter(float pressure_hPa, float temp_C) {
+  float T_kelvin = temp_C + 273.15;
+  return (pressure_hPa * GRAVITY) / (R_DRY_AIR * T_kelvin);
+}
+
+// Computes both the raw drops and the elevation-corrected drops over the same
+// 30-min and 3-h windows. Correction is applied whenever (a) we have a current
+// altitude fix and (b) the window's old sample also had a valid altitude.
+// Otherwise the corrected value falls back to the raw value — so the device
+// still works exactly as before whenever GPS is unavailable (the standalone case).
+// NOTE: the full GPS altitude change is subtracted, with no deadband/filtering,
+// so stationary GPS vertical noise passes straight into the corrected drops.
+void computeCorrectedDrops(float pressure, float temperature,
+                           float &rawDrop3h, float &rawDrop30min,
+                           float &corrDrop3h, float &corrDrop30min,
+                           bool &applied3h, bool &applied30m) {
+
+  computeDrops(pressure, rawDrop3h, rawDrop30min);
+  corrDrop3h    = rawDrop3h;     // default: no correction
+  corrDrop30min = rawDrop30min;
+  applied3h  = false;
+  applied30m = false;
+
+  if (isnan(lastValidAltitude)) return;   // no current fix → leave drops raw (Condition left only because of Sim_modes)
+
+  float perMeter = pressurePerMeter(pressure, temperature);  // hPa/m at this altitude
+  int   cur      = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+
+  // 30-minute window — same index logic as computeDrops()
+  if (historyFilled || historyIndex >= SAMPLES_30MIN + 1) {
+    int   idx30  = (cur - SAMPLES_30MIN + HISTORY_SIZE) % HISTORY_SIZE;
+    float altOld = altitudeHistory[idx30];
+    if (!isnan(altOld)) {
+      float dH      = lastValidAltitude - altOld;     // +climb, −descent
+      float dP_alt  = perMeter * dH;                  // pressure change due to moving
+      corrDrop30min = rawDrop30min - dP_alt;          // remove the full elevation component
+      applied30m    = true;
+    }
+  }
+
+  // 3-hour window — oldest sample sits at historyIndex (matches computeDrops)
+  if (historyFilled) {
+    float altOld = altitudeHistory[historyIndex];
+    if (!isnan(altOld)) {
+      float dH     = lastValidAltitude - altOld;
+      float dP_alt = perMeter * dH;
+      corrDrop3h   = rawDrop3h - dP_alt;
+      applied3h    = true;
+    }
+  }
+}
+
 // ─── BLE output ──────────────────────────────────────────────────────────────
 // Builds the current-reading JSON (same fields as the old DATA: line) and
 // publishes it: sets the DATA characteristic value (so a fresh READ returns it)
 // and fires a notify to any subscribed phone.
 void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
 
-  float pressureDrop3h, pressureDrop30min;
-  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
+  float rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min;
+  bool  applied3h, applied30m;
+  computeCorrectedDrops(pressure, temp, rawDrop3h, rawDrop30min,
+                        corrDrop3h, corrDrop30min, applied3h, applied30m);
 
   // Device uptime in seconds (rollover-proof: esp_timer is 64-bit microseconds).
   uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
 
-  char json[176];
+  int   fix    = gpsHasFix ? 1 : 0;
+  float altOut = isnan(lastValidAltitude) ? 0.0f : lastValidAltitude;
+
+  // p_drop_*  = raw drops (kept for the app + thesis comparison)
+  // cp_drop_* = altitude-corrected drops actually used by the alert logic
+  // fix/lat/lon/alt = GPS context (Stage 4 app addition)
+  char json[256];
   snprintf(json, sizeof(json),
     "{\"temp\":%.1f,\"pressure\":%.2f,\"humidity\":%.1f,\"alert\":%d,"
-    "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,\"bat\":%d,\"up_s\":%lu}",
-    temp, pressure, humidity, (int)alert, pressureDrop3h, pressureDrop30min, batteryPct,
-    (unsigned long)uptimeSec);
+    "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,"
+    "\"cp_drop_3h\":%.2f,\"cp_drop_30m\":%.2f,"
+    "\"bat\":%d,\"up_s\":%lu,"
+    "\"fix\":%d,\"lat\":%.5f,\"lon\":%.5f,\"alt\":%.1f}",
+    temp, pressure, humidity, (int)alert,
+    rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min,
+    batteryPct, (unsigned long)uptimeSec,
+    fix, lastValidLat, lastValidLng, altOut);
 
   if (pDataChar != nullptr) {
     pDataChar->setValue((uint8_t*)json, strlen(json));
@@ -504,8 +629,10 @@ String getAlertName(AlertLevel alert) {
 }
 
 void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct) {
-  float pressureDrop3h, pressureDrop30min;
-  computeDrops(pressure, pressureDrop3h, pressureDrop30min);
+  float rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min;
+  bool  applied3h, applied30m;
+  computeCorrectedDrops(pressure, temp, rawDrop3h, rawDrop30min,
+                        corrDrop3h, corrDrop30min, applied3h, applied30m);
 
   Serial.println("════════════════════════════════════════");
 #if SIMULATION_MODE == 1
@@ -520,8 +647,20 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
   Serial.print("📊 Humidity:       "); Serial.print(humidity, 1);          Serial.println(" %");
   Serial.print("🔋 Battery:        "); Serial.print(batteryPct);            Serial.println(" %");
   Serial.println("────────────────────────────────────────");
-  Serial.print("📉 3h Drop:        "); Serial.print(pressureDrop3h, 2);    Serial.println(" hPa");
-  Serial.print("📉 30min Drop:     "); Serial.print(pressureDrop30min, 2); Serial.println(" hPa");
+  if (gpsHasFix) {
+    Serial.print("🛰  Altitude:       "); Serial.print(lastValidAltitude, 1); Serial.println(" m MSL");
+    Serial.print("🛰  Lapse @ alt:    "); Serial.print(pressurePerMeter(pressure, temp), 4);
+    Serial.println(" hPa/m");
+  } else {
+    Serial.println("🛰  GPS:            no fix — using RAW drops");
+  }
+  Serial.println("────────────────────────────────────────");
+  Serial.print("📉 3h Drop  raw:   "); Serial.print(rawDrop3h, 2);    Serial.println(" hPa");
+  Serial.print("📉 3h Drop  corr:  "); Serial.print(corrDrop3h, 2);
+  Serial.println(applied3h ? " hPa  (alt-corrected)" : " hPa  (no correction)");
+  Serial.print("📉 30m Drop raw:   "); Serial.print(rawDrop30min, 2); Serial.println(" hPa");
+  Serial.print("📉 30m Drop corr:  "); Serial.print(corrDrop30min, 2);
+  Serial.println(applied30m ? " hPa  (alt-corrected)" : " hPa  (no correction)");
   Serial.print("📝 History:        ");
   Serial.print(historyFilled ? HISTORY_SIZE : historyIndex);
   Serial.println(" samples");
@@ -574,6 +713,17 @@ void updateGPS() {
   while (Serial2.available() > 0) {
     gps.encode(Serial2.read());
   }
+
+  // Cache the latest valid fix so the storm algorithm and BLE payload can use it
+  // between the (slower) print cycles below.
+  if (gps.location.isUpdated() && gps.location.isValid()) {
+    lastValidLat = gps.location.lat();
+    lastValidLng = gps.location.lng();
+  }
+  if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
+    lastValidAltitude = gps.altitude.meters();
+  }
+  gpsHasFix = gps.location.isValid() && !isnan(lastValidAltitude);
 
   // Print a summary once per interval
   if (millis() - lastGpsPrint >= GPS_PRINT_INTERVAL) {
