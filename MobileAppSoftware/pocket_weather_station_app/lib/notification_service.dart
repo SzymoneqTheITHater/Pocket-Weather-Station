@@ -84,10 +84,16 @@ class NotificationService {
         return '⚠️';
       case AlertLevel.severe:
         return '⛈️';
+      case AlertLevel.unknown:
+        return '❓';
     }
   }
 
   String _body(AlertLevel from, AlertLevel to) {
+    // First real verdict after warmup: the device was UNKNOWN, now it knows.
+    if (from == AlertLevel.unknown) {
+      return 'Conditions have been established: ${to.label}.';
+    }
     if (to == AlertLevel.clear) {
       return '✅ Conditions have cleared (was ${from.label}).';
     }

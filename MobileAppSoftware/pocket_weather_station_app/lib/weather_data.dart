@@ -8,12 +8,15 @@ import 'package:flutter/material.dart';
 const int kDrop30mReadyUptimeSec = 30 * 60; // 1800 s
 const int kDrop3hReadyUptimeSec = 180 * 60; // 10800 s
 
-/// The four storm-alert levels emitted by the firmware (JSON field `alert`).
+/// The storm-alert levels emitted by the firmware (JSON field `alert`).
+/// UNKNOWN (4) is sent while the device is warming up — a real verdict can't be
+/// trusted until the 30-min pressure window is valid (~30 min after boot).
 enum AlertLevel {
   clear(0, 'CLEAR', Color(0xFF2E7D32), Color(0xFFE8F5E9), Icons.check_circle),
   watch(1, 'WATCH', Color(0xFFF9A825), Color(0xFFFFF8E1), Icons.visibility),
   warning(2, 'WARNING', Color(0xFFEF6C00), Color(0xFFFFF3E0), Icons.warning_amber),
-  severe(3, 'SEVERE', Color(0xFFC62828), Color(0xFFFFEBEE), Icons.flash_on);
+  severe(3, 'SEVERE', Color(0xFFC62828), Color(0xFFFFEBEE), Icons.flash_on),
+  unknown(4, 'UNKNOWN', Color(0xFF607D8B), Color(0xFFECEFF1), Icons.help_outline);
 
   const AlertLevel(this.code, this.label, this.color, this.background, this.icon);
 
@@ -32,18 +35,19 @@ enum AlertLevel {
   /// Icon shown alongside the label.
   final IconData icon;
 
-  /// Maps a device `alert` code (0-3) to an [AlertLevel], defaulting to CLEAR
-  /// for any unexpected value.
+  /// Maps a device `alert` code (0-4) to an [AlertLevel], defaulting to UNKNOWN
+  /// for any unexpected value (safer than a false CLEAR).
   static AlertLevel fromCode(int code) {
     return AlertLevel.values.firstWhere(
       (a) => a.code == code,
-      orElse: () => AlertLevel.clear,
+      orElse: () => AlertLevel.unknown,
     );
   }
 }
 
 /// A single current-reading snapshot parsed from the DATA characteristic JSON:
-/// `{"temp","pressure","humidity","alert","p_drop_3h","p_drop_30m","bat","up_s"}`.
+/// `{"temp","pressure","humidity","alert","p_drop_3h","p_drop_30m","cp_drop_3h",
+/// "cp_drop_30m","bat","up_s","fix","lat","lon","alt"}`.
 class WeatherData {
   const WeatherData({
     required this.temperature,
@@ -54,16 +58,30 @@ class WeatherData {
     required this.drop30m,
     required this.battery,
     required this.uptimeSeconds,
+    this.corrDrop3h = 0.0,
+    this.corrDrop30m = 0.0,
+    this.hasFix = false,
+    this.latitude = 0.0,
+    this.longitude = 0.0,
+    this.altitude = 0.0,
   });
 
   final double temperature; // °C
   final double pressure; // hPa
   final double humidity; // %
   final AlertLevel alert;
-  final double drop3h; // hPa, 0.0 while warming up
-  final double drop30m; // hPa, 0.0 while warming up
+  final double drop3h; // hPa, 0.0 while warming up (raw)
+  final double drop30m; // hPa, 0.0 while warming up (raw)
   final int battery; // %
   final int uptimeSeconds; // device uptime (up_s)
+
+  // ─── GPS / altitude-correction context (Stage 4) ───────────────────────────
+  final double corrDrop3h; // cp_drop_3h — altitude-corrected (== raw when no fix)
+  final double corrDrop30m; // cp_drop_30m — altitude-corrected (== raw when no fix)
+  final bool hasFix; // fix == 1
+  final double latitude; // lat
+  final double longitude; // lon
+  final double altitude; // alt, m MSL
 
   /// True once the device has been up long enough for the 30-min drop to be valid.
   bool get drop30mReady => uptimeSeconds >= kDrop30mReadyUptimeSec;
@@ -94,6 +112,12 @@ class WeatherData {
         drop30m: _toDouble(decoded['p_drop_30m']),
         battery: _toInt(decoded['bat']),
         uptimeSeconds: _toInt(decoded['up_s']),
+        corrDrop3h: _toDouble(decoded['cp_drop_3h']),
+        corrDrop30m: _toDouble(decoded['cp_drop_30m']),
+        hasFix: _toInt(decoded['fix']) == 1,
+        latitude: _toDouble(decoded['lat']),
+        longitude: _toDouble(decoded['lon']),
+        altitude: _toDouble(decoded['alt']),
       );
     } catch (_) {
       return null;

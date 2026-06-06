@@ -40,8 +40,8 @@
  */
 
 // ─── SIMULATION FLAGS — edit these to switch modes ───────────────────────────
-#define SIMULATION_MODE  1   // 0 = real sensors,  1 = simulated data
-#define SIMULATION_FAST  1   // 0 = slow/realistic, 1 = fast/testing
+#define SIMULATION_MODE  0   // 0 = real sensors,  1 = simulated data
+#define SIMULATION_FAST  0   // 0 = slow/realistic, 1 = fast/testing
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Wire.h>
@@ -119,8 +119,18 @@ const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
 #endif
 
 // ─── Alert levels ─────────────────────────────────────────────────────────────
-enum AlertLevel { CLEAR = 0, WATCH = 1, WARNING = 2, SEVERE = 3 };
-AlertLevel currentAlert = CLEAR;
+// UNKNOWN (code 4) is emitted while the device is still warming up: a real CLEAR
+// verdict cannot be trusted until the 30-min pressure window has enough samples,
+// so until then the level is genuinely undetermined and no alert LED lights.
+enum AlertLevel { CLEAR = 0, WATCH = 1, WARNING = 2, SEVERE = 3, UNKNOWN = 4 };
+AlertLevel currentAlert = UNKNOWN;
+// Alert LEDs start OFF at boot, so the first measurement must light them even if
+// its level equals the initial state (the change-only update below would skip it).
+bool firstMeasurementDone = false;
+// Real measurement cycles since boot. Drives the warmup gate that holds the level
+// at UNKNOWN until the 30-min window is valid. Counts true elapsed cycles, so it
+// is NOT bypassed by fast-sim forcing historyFilled every cycle.
+int measurementCount = 0;
 
 const char* deviceName = "MountainGuide_Weather";
 
@@ -316,12 +326,21 @@ void setup() {
   pinMode(PIN_LED_RED,    OUTPUT);
   pinMode(PIN_BUZZER,     OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
-  updateLEDs(CLEAR);
+  // Alert LEDs start OFF — nothing should imply a measured alert level until the
+  // first weather reading is computed.
+  digitalWrite(PIN_LED_GREEN,  LOW);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_LED_RED,    LOW);
 
   pinMode(BAT_LED_GREEN,  OUTPUT);
   pinMode(BAT_LED_YELLOW, OUTPUT);
   pinMode(BAT_LED_RED,    OUTPUT);
   analogReadResolution(12);
+
+  // Battery sensing is independent of the weather/GPS subsystem — light a battery
+  // LED immediately at boot, then keep refreshing it once per measurement cycle.
+  batteryPct = readBatteryPercent();
+  updateBatteryLEDs(batteryPct);
 
   // ─── BLE init (NimBLE GATT peripheral) ──────────────────────────────────────
   Serial.print("Initializing BLE... ");
@@ -359,8 +378,25 @@ void setup() {
   Serial.println("Waiting for first GPS fix (will wait as long as needed)...");
   unsigned long gpsWaitStart = millis();
   unsigned long lastWaitPrint = 0;
+
+  // "Waiting for GPS" indicator: sweep the alert LEDs green → yellow → red, one
+  // lit at a time for 0.5 s each, so the user knows the device is powered and
+  // searching (not yet monitoring). Non-blocking, driven by millis().
+  const unsigned long GPS_WAIT_LED_INTERVAL = 500;   // 0.5 s per LED
+  unsigned long lastWaitLed = 0;
+  int           waitLedStep = 0;                     // 0=green, 1=yellow, 2=red
+
   while (!gpsHasFix) {
     updateGPS();                                   // keeps parsing NMEA; sets gpsHasFix
+
+    if (millis() - lastWaitLed >= GPS_WAIT_LED_INTERVAL) {
+      lastWaitLed = millis();
+      digitalWrite(PIN_LED_GREEN,  waitLedStep == 0 ? HIGH : LOW);
+      digitalWrite(PIN_LED_YELLOW, waitLedStep == 1 ? HIGH : LOW);
+      digitalWrite(PIN_LED_RED,    waitLedStep == 2 ? HIGH : LOW);
+      waitLedStep = (waitLedStep + 1) % 3;
+    }
+
     if (millis() - lastWaitPrint >= 5000) {        // heartbeat so the monitor shows life
       lastWaitPrint = millis();
       Serial.print("  ...still waiting for GPS fix (");
@@ -369,6 +405,13 @@ void setup() {
     }
     delay(50);                                     // yields to BLE + idle/WDT task
   }
+
+  // Fix acquired — clear the sweep so no alert LED is lit until the first
+  // measurement sets a real level.
+  digitalWrite(PIN_LED_GREEN,  LOW);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_LED_RED,    LOW);
+
   Serial.print("✓ GPS fix acquired after ");
   Serial.print((millis() - gpsWaitStart) / 1000);
   Serial.println(" s — starting measurements.");
@@ -396,6 +439,7 @@ updateGPS();
 
   if (currentTime - lastReadTime >= READ_INTERVAL || lastReadTime == 0) {
     lastReadTime = currentTime;
+    measurementCount++;
 
     float temperature, pressure, humidity;
 
@@ -426,7 +470,20 @@ updateGPS();
     updateBatteryLEDs(batteryPct);
 
     AlertLevel newAlert = analyzeWeatherData(pressure, humidity, temperature);
+    // Warmup gate: hold the level at UNKNOWN until the 30-min window is valid
+    // (needs SAMPLES_30MIN + 1 real samples). analyzeWeatherData() still runs and
+    // computes the underlying level — we just don't trust/emit it yet.
+    bool warmupComplete = (measurementCount > SAMPLES_30MIN);
+    if (!warmupComplete) newAlert = UNKNOWN;
+
     sendDataViaBluetooth(temperature, pressure, humidity, newAlert, batteryPct);
+
+    // First measurement: alert LEDs were OFF since boot, so light them to reflect
+    // the real level even if it matches the initial CLEAR (change-only logic below).
+    if (!firstMeasurementDone) {
+      firstMeasurementDone = true;
+      updateLEDs(newAlert);
+    }
 
     if (newAlert != currentAlert) {
       Serial.print("⚠ ALERT LEVEL CHANGED: ");
@@ -671,6 +728,7 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
     case WATCH:   Serial.println("⚠ WATCH");    break;
     case WARNING: Serial.println("⚠⚠ WARNING"); break;
     case SEVERE:  Serial.println("🚨 SEVERE");  break;
+    case UNKNOWN: Serial.println("❔ UNKNOWN (warming up)"); break;
   }
   Serial.println("════════════════════════════════════════\n");
 }
