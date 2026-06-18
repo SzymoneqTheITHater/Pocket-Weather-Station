@@ -2,11 +2,14 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-/// Uptime (seconds) after which each pressure-drop trend becomes meaningful.
-/// These mirror the firmware: the 30-min drop needs SAMPLES_30MIN (6) intervals
-/// of 5 min, and the 3-h drop needs the full 37-sample history (~180 min).
-const int kDrop30mReadyUptimeSec = 30 * 60; // 1800 s
-const int kDrop3hReadyUptimeSec = 180 * 60; // 10800 s
+/// Monitoring time (seconds since the first measurement) after which each
+/// pressure-drop trend becomes meaningful. These mirror the firmware: the 30-min
+/// drop needs SAMPLES_30MIN (15) intervals of 2 min, and the 3-h drop needs the
+/// full 91-sample history (~180 min). Keyed to monitoring time (`mon_s`), not
+/// power-on uptime — the device may wait minutes for a GPS fix before its first
+/// sample, and that wait must not count toward readiness.
+const int kDrop30mReadyMonitoringSec = 30 * 60; // 1800 s
+const int kDrop3hReadyMonitoringSec = 180 * 60; // 10800 s
 
 /// The storm-alert levels emitted by the firmware (JSON field `alert`).
 /// UNKNOWN (4) is sent while the device is warming up — a real verdict can't be
@@ -47,7 +50,8 @@ enum AlertLevel {
 
 /// A single current-reading snapshot parsed from the DATA characteristic JSON:
 /// `{"temp","pressure","humidity","alert","p_drop_3h","p_drop_30m","cp_drop_3h",
-/// "cp_drop_30m","bat","up_s","fix","lat","lon","alt"}`.
+/// "cp_drop_30m","bat","up_s","mon_s","fix","lat","lon","alt"}`. `up_s` (power-on
+/// uptime) is sent by the firmware but unused here; readiness uses `mon_s`.
 class WeatherData {
   const WeatherData({
     required this.temperature,
@@ -57,7 +61,7 @@ class WeatherData {
     required this.drop3h,
     required this.drop30m,
     required this.battery,
-    required this.uptimeSeconds,
+    required this.monitoringSeconds,
     this.corrDrop3h = 0.0,
     this.corrDrop30m = 0.0,
     this.hasFix = false,
@@ -73,7 +77,7 @@ class WeatherData {
   final double drop3h; // hPa, 0.0 while warming up (raw)
   final double drop30m; // hPa, 0.0 while warming up (raw)
   final int battery; // %
-  final int uptimeSeconds; // device uptime (up_s)
+  final int monitoringSeconds; // time since the first measurement (mon_s)
 
   // ─── GPS / altitude-correction context (Stage 4) ───────────────────────────
   final double corrDrop3h; // cp_drop_3h — altitude-corrected (== raw when no fix)
@@ -83,19 +87,23 @@ class WeatherData {
   final double longitude; // lon
   final double altitude; // alt, m MSL
 
-  /// True once the device has been up long enough for the 30-min drop to be valid.
-  bool get drop30mReady => uptimeSeconds >= kDrop30mReadyUptimeSec;
+  /// True once monitoring has run long enough for the 30-min drop to be valid.
+  bool get drop30mReady => monitoringSeconds >= kDrop30mReadyMonitoringSec;
 
-  /// True once the device has been up long enough for the 3-h drop to be valid.
-  bool get drop3hReady => uptimeSeconds >= kDrop3hReadyUptimeSec;
+  /// True once monitoring has run long enough for the 3-h drop to be valid.
+  bool get drop3hReady => monitoringSeconds >= kDrop3hReadyMonitoringSec;
 
   /// Remaining minutes until the 30-min drop is valid (0 once ready).
   int get drop30mReadyInMin =>
-      ((kDrop30mReadyUptimeSec - uptimeSeconds) / 60).ceil().clamp(0, 9999);
+      ((kDrop30mReadyMonitoringSec - monitoringSeconds) / 60)
+          .ceil()
+          .clamp(0, 9999);
 
   /// Remaining minutes until the 3-h drop is valid (0 once ready).
   int get drop3hReadyInMin =>
-      ((kDrop3hReadyUptimeSec - uptimeSeconds) / 60).ceil().clamp(0, 9999);
+      ((kDrop3hReadyMonitoringSec - monitoringSeconds) / 60)
+          .ceil()
+          .clamp(0, 9999);
 
   /// Parses a raw UTF-8 JSON payload. Returns `null` for the firmware's `"{}"`
   /// placeholder or any malformed/incomplete frame.
@@ -111,7 +119,7 @@ class WeatherData {
         drop3h: _toDouble(decoded['p_drop_3h']),
         drop30m: _toDouble(decoded['p_drop_30m']),
         battery: _toInt(decoded['bat']),
-        uptimeSeconds: _toInt(decoded['up_s']),
+        monitoringSeconds: _toInt(decoded['mon_s']),
         corrDrop3h: _toDouble(decoded['cp_drop_3h']),
         corrDrop30m: _toDouble(decoded['cp_drop_30m']),
         hasFix: _toInt(decoded['fix']) == 1,

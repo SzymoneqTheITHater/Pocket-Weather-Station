@@ -22,9 +22,9 @@ class DataScreen extends StatefulWidget {
 class _DataScreenState extends State<DataScreen> {
   WeatherData? _data;
 
-  /// Uptime anchor: the last received `up_s` and the wall-clock instant it
-  /// arrived. Displayed uptime = anchor + (now − anchorWall), ticked every 1 s.
-  int _anchorUpS = 0;
+  /// Monitoring-time anchor: the last received `mon_s` and the wall-clock instant
+  /// it arrived. Displayed time = anchor + (now − anchorWall), ticked every 1 s.
+  int _anchorMonSec = 0;
   DateTime _anchorWall = DateTime.now();
 
   Timer? _ticker;
@@ -56,13 +56,13 @@ class _DataScreenState extends State<DataScreen> {
   void _applyData(WeatherData? data) {
     if (data == null) return;
     _data = data;
-    _anchorUpS = data.uptimeSeconds;
+    _anchorMonSec = data.monitoringSeconds;
     _anchorWall = DateTime.now();
   }
 
-  /// Live uptime in seconds, extrapolated from the anchor.
-  int get _liveUptimeSec =>
-      _anchorUpS + DateTime.now().difference(_anchorWall).inSeconds;
+  /// Live monitoring time in seconds, extrapolated from the anchor.
+  int get _liveMonitoringSec =>
+      _anchorMonSec + DateTime.now().difference(_anchorWall).inSeconds;
 
   void _leave() {
     if (_popped || !mounted) return;
@@ -136,76 +136,68 @@ class _DataScreenState extends State<DataScreen> {
           children: [
             _AlertBanner(alert: d.alert, readyInMin: d.drop30mReadyInMin),
             const SizedBox(height: 12),
-            // stretch + IntrinsicHeight: both tiles in the row grow to the
-            // taller one's height so single-line tiles match the 2-line GPS tile.
-            IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    child: _ReadingCard(
-                      icon: Icons.thermostat,
-                      label: 'Temperature',
-                      value: d.temperature.toStringAsFixed(1),
-                      unit: '°C',
-                    ),
+            // Every tile is fixed to _kTileHeight so all reading rows match,
+            // regardless of value width (the pressure tile's FittedBox no longer
+            // inflates the row via intrinsic height).
+            Row(
+              children: [
+                Expanded(
+                  child: _ReadingCard(
+                    icon: Icons.thermostat,
+                    label: 'Temperature',
+                    value: d.temperature.toStringAsFixed(1),
+                    unit: '°C',
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _ReadingCard(
-                      icon: Icons.speed,
-                      label: 'Pressure',
-                      value: d.pressure.toStringAsFixed(2),
-                      unit: 'hPa',
-                    ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ReadingCard(
+                    icon: Icons.speed,
+                    label: 'Pressure',
+                    value: d.pressure.toStringAsFixed(2),
+                    unit: 'hPa',
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
-            IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    child: _ReadingCard(
-                      icon: Icons.water_drop,
-                      label: 'Humidity',
-                      value: d.humidity.toStringAsFixed(1),
-                      unit: '%',
-                    ),
+            Row(
+              children: [
+                Expanded(
+                  child: _ReadingCard(
+                    icon: Icons.water_drop,
+                    label: 'Humidity',
+                    value: d.humidity.toStringAsFixed(1),
+                    unit: '%',
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _ReadingCard(
-                      icon: _batteryIcon(d.battery),
-                      label: 'Battery',
-                      value: '${d.battery}',
-                      unit: '%',
-                    ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ReadingCard(
+                    icon: _batteryIcon(d.battery),
+                    label: 'Battery',
+                    value: '${d.battery}',
+                    unit: '%',
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             // GPS (under Humidity) + Altitude (under Battery). Both derive from
             // the firmware's GPS fields; show placeholders when there's no fix.
-            IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(child: _GpsCard(data: d)),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _ReadingCard(
-                      icon: Icons.terrain,
-                      label: 'Altitude',
-                      value: d.hasFix ? d.altitude.toStringAsFixed(0) : '—',
-                      unit: d.hasFix ? 'm' : '',
-                    ),
+            Row(
+              children: [
+                Expanded(child: _GpsCard(data: d)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _ReadingCard(
+                    icon: Icons.terrain,
+                    label: 'Altitude',
+                    value: d.hasFix ? d.altitude.toStringAsFixed(1) : '—',
+                    unit: d.hasFix ? 'm' : '',
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             // Altitude-corrected trends first (the values the alert algorithm
@@ -230,7 +222,7 @@ class _DataScreenState extends State<DataScreen> {
               drop30m: d.drop30m,
             ),
             const SizedBox(height: 12),
-            _UptimeCard(uptimeSeconds: _liveUptimeSec),
+            _UptimeCard(monitoringSeconds: _liveMonitoringSec),
           ],
         ),
       ),
@@ -312,6 +304,26 @@ class _AlertBanner extends StatelessWidget {
   }
 }
 
+/// Fixed height of the value area (the region below the label) shared by every
+/// tile. One-line tiles render their value here; the GPS tile fits its two
+/// coordinate lines in the same box — so all tiles end up equal height with no
+/// overflow. Sized to hold the GPS tile's two coordinate lines near full size.
+const double _kTileValueAreaHeight = 46;
+
+/// Builds the label row (icon + caption) shared by [_ReadingCard]/[_GpsCard].
+Widget _tileLabel(IconData icon, String label) {
+  return Row(
+    children: [
+      Icon(icon, size: 20, color: Colors.blueGrey),
+      const SizedBox(width: 6),
+      Text(
+        label,
+        style: const TextStyle(fontSize: 13, color: Colors.black54),
+      ),
+    ],
+  );
+}
+
 /// A single labelled reading tile (temperature, pressure, …).
 class _ReadingCard extends StatelessWidget {
   const _ReadingCard({
@@ -330,43 +342,39 @@ class _ReadingCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                Icon(icon, size: 20, color: Colors.blueGrey),
-                const SizedBox(width: 6),
-                Text(
-                  label,
-                  style: const TextStyle(fontSize: 13, color: Colors.black54),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
+            _tileLabel(icon, label),
+            const SizedBox(height: 6),
             // scaleDown keeps value+unit on one line; 4-digit pressures shrink
-            // slightly instead of wrapping "hPa" below (which enlarged the tile).
-            FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
-              child: RichText(
-                text: TextSpan(
-                  style: DefaultTextStyle.of(context).style,
-                  children: [
-                    TextSpan(
-                      text: value,
-                      style: const TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
+            // instead of wrapping "hPa" below. The fixed-height box keeps every
+            // tile the same height as the GPS tile.
+            SizedBox(
+              height: _kTileValueAreaHeight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: RichText(
+                  text: TextSpan(
+                    style: DefaultTextStyle.of(context).style,
+                    children: [
+                      TextSpan(
+                        text: value,
+                        style: const TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                    TextSpan(
-                      text: ' $unit',
-                      style:
-                          const TextStyle(fontSize: 15, color: Colors.black54),
-                    ),
-                  ],
+                      TextSpan(
+                        text: ' $unit',
+                        style: const TextStyle(
+                            fontSize: 15, color: Colors.black54),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -388,36 +396,43 @@ class _GpsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: const [
-                Icon(Icons.location_on, size: 20, color: Colors.blueGrey),
-                SizedBox(width: 6),
-                Text(
-                  'GPS',
-                  style: TextStyle(fontSize: 13, color: Colors.black54),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            if (data.hasFix) ...[
-              // Fixed-width "Lat:"/"Lon:" labels so both numbers start at the
-              // same x — the first digits line up in one column.
-              _coordRow('Lat:', data.latitude),
-              const SizedBox(height: 2),
-              _coordRow('Lon:', data.longitude),
-            ] else
-              const Text(
-                'No fix',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black38,
-                ),
+            _tileLabel(Icons.location_on, 'GPS'),
+            const SizedBox(height: 6),
+            // The two coordinate lines are taller than a single value line, so
+            // scaleDown shrinks them to fit the shared value-area height — the
+            // GPS tile then matches the compact one-line tiles exactly.
+            SizedBox(
+              height: _kTileValueAreaHeight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: data.hasFix
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Fixed-width "Lat:"/"Lon:" labels so both numbers
+                          // start at the same x — first digits align.
+                          _coordRow('Lat:', data.latitude),
+                          const SizedBox(height: 2),
+                          _coordRow('Lon:', data.longitude),
+                        ],
+                      )
+                    : const Text(
+                        'No fix',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black38,
+                        ),
+                      ),
               ),
+            ),
           ],
         ),
       ),
@@ -522,11 +537,11 @@ class _DropsCard extends StatelessWidget {
   }
 }
 
-/// Card showing the live-ticking device uptime.
+/// Card showing the live-ticking monitoring time (since the first measurement).
 class _UptimeCard extends StatelessWidget {
-  const _UptimeCard({required this.uptimeSeconds});
+  const _UptimeCard({required this.monitoringSeconds});
 
-  final int uptimeSeconds;
+  final int monitoringSeconds;
 
   @override
   Widget build(BuildContext context) {
@@ -542,12 +557,12 @@ class _UptimeCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Device has been working for',
+                    'Device has been monitoring for',
                     style: TextStyle(fontSize: 13, color: Colors.black54),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    formatUptime(uptimeSeconds),
+                    formatUptime(monitoringSeconds),
                     style: const TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.w600,

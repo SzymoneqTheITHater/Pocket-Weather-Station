@@ -77,11 +77,11 @@ TinyGPSCustom fixType(gps, "GNGSA", 2);   // 1=no fix, 2=2D, 3=3D
 Adafruit_BME280 bme;
 
 // ─── Storm detection parameters ───────────────────────────────────────────────
-const int   HISTORY_SIZE             = 37;
+const int   HISTORY_SIZE             = 91;
 float       pressureHistory[HISTORY_SIZE];
 int         historyIndex             = 0;
 bool        historyFilled            = false;
-const int   SAMPLES_30MIN            = 6;
+const int   SAMPLES_30MIN            = 15;
 
 const float WARNING_PRESSURE_THRESHOLD  = 3.0;
 const float WARNING_HUMIDITY_THRESHOLD       = 75.0;
@@ -112,10 +112,18 @@ int batteryPct = 100;
 // ─── Timing ───────────────────────────────────────────────────────────────────
 unsigned long       lastReadTime  = 0;
 
+// Monitoring clock: esp_timer micros captured at the FIRST real measurement. This
+// is distinct from uptime (esp_timer from boot): in real mode the device blocks in
+// setup() waiting for a GPS fix, so monitoring starts well after power-on. The app
+// derives "drop trend ready in X min" from this, not uptime, so the countdown can't
+// be skewed by however long the GPS fix took.
+int64_t monitorStartUs    = 0;
+bool    monitoringStarted = false;
+
 #if SIMULATION_FAST == 1
 const unsigned long READ_INTERVAL = 15000;   // 15 seconds — fast testing (long enough to see 10 s SEVERE buzzer window expire)
 #else
-const unsigned long READ_INTERVAL = 300000;  // 5 minutes — normal / slow sim
+const unsigned long READ_INTERVAL = 120000;  // 2 minutes — normal / slow sim
 #endif
 
 // ─── Alert levels ─────────────────────────────────────────────────────────────
@@ -441,6 +449,13 @@ updateGPS();
     lastReadTime = currentTime;
     measurementCount++;
 
+    // Anchor the monitoring clock on the first real sample (post-GPS-fix in real
+    // mode; at boot in SIMULATION_MODE since the GPS wait is skipped there).
+    if (measurementCount == 1) {
+      monitorStartUs    = esp_timer_get_time();
+      monitoringStarted = true;
+    }
+
     float temperature, pressure, humidity;
 
 #if SIMULATION_MODE == 1
@@ -570,7 +585,7 @@ void computeDrops(float pressure, float &drop3h, float &drop30min) {
   }
 
   // 3-hour drop: only meaningful once the buffer holds a full window.
-  // With HISTORY_SIZE = 36 and 5-min samples this span is ~175 min; use 37 for a true 180.
+  // With 90 intervals and 2-min samples this span is 180 min; HISTORY_SIZE = 91 for a true 180.
   if (historyFilled) {
     drop3h = pressureHistory[historyIndex] - pressure;  // historyIndex now points at the oldest sample
   }
@@ -646,23 +661,28 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
 
   // Device uptime in seconds (rollover-proof: esp_timer is 64-bit microseconds).
   uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+  // Monitoring time in seconds: elapsed since the first real measurement (0 until then).
+  // The app bases the drop-trend "ready in X min" countdown on this, not uptime.
+  uint32_t monSec = monitoringStarted
+      ? (uint32_t)((esp_timer_get_time() - monitorStartUs) / 1000000LL) : 0;
 
   int   fix    = gpsHasFix ? 1 : 0;
   float altOut = isnan(lastValidAltitude) ? 0.0f : lastValidAltitude;
 
   // p_drop_*  = raw drops (kept for the app + thesis comparison)
   // cp_drop_* = altitude-corrected drops actually used by the alert logic
+  // up_s = uptime since boot; mon_s = time since first measurement (drives app countdown)
   // fix/lat/lon/alt = GPS context (Stage 4 app addition)
-  char json[256];
+  char json[288];
   snprintf(json, sizeof(json),
     "{\"temp\":%.1f,\"pressure\":%.2f,\"humidity\":%.1f,\"alert\":%d,"
     "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,"
     "\"cp_drop_3h\":%.2f,\"cp_drop_30m\":%.2f,"
-    "\"bat\":%d,\"up_s\":%lu,"
+    "\"bat\":%d,\"up_s\":%lu,\"mon_s\":%lu,"
     "\"fix\":%d,\"lat\":%.5f,\"lon\":%.5f,\"alt\":%.1f}",
     temp, pressure, humidity, (int)alert,
     rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min,
-    batteryPct, (unsigned long)uptimeSec,
+    batteryPct, (unsigned long)uptimeSec, (unsigned long)monSec,
     fix, lastValidLat, lastValidLng, altOut);
 
   if (pDataChar != nullptr) {

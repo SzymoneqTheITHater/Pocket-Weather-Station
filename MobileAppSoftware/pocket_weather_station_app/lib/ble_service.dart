@@ -42,6 +42,12 @@ class WeatherBleService {
   /// any BLE error. Safe to call again after a failure (used by Retry).
   Future<bool> findAndConnect() async {
     try {
+      // Drop any reading cached from a previous session so a reconnect to a
+      // device that's still GPS-waiting (its DATA value is the "{}" placeholder)
+      // doesn't seed the data screen with stale tiles — it should show the
+      // "Waiting for GPS fix" screen until the first real reading arrives.
+      _lastData = null;
+
       if (await FlutterBluePlus.isSupported == false) return false;
 
       // On Android this pops the system "turn Bluetooth on" dialog if it's off.
@@ -155,6 +161,8 @@ class WeatherBleService {
     await _stopScan();
     await _valueSub?.cancel();
     _valueSub = null;
+    // Forget the last reading so the next session starts clean (see findAndConnect).
+    _lastData = null;
     try {
       await _device?.disconnect();
     } catch (_) {}
