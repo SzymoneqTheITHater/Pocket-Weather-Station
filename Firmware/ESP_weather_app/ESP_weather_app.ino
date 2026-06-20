@@ -106,6 +106,7 @@ float  lastValidAltitude = NAN;         // metres MSL, NAN until first valid fix
 double lastValidLat      = 0.0;
 double lastValidLng      = 0.0;
 bool   gpsHasFix         = false;
+const unsigned long GPS_FIX_MAX_AGE_MS = 10000;   // tune to your GPS output rate (a few s of slack)
 
 // ─── Battery global variable (updated every reading) ─────────────────────────────────
 int batteryPct = 100;
@@ -729,7 +730,7 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
     Serial.print("🛰  Lapse @ alt:    "); Serial.print(pressurePerMeter(pressure, temp), 4);
     Serial.println(" hPa/m");
   } else {
-    Serial.println("🛰  GPS:            no fix — using RAW drops");
+    Serial.println("🛰  GPS:            no current fix — using last-known altitude");
   }
   Serial.println("────────────────────────────────────────");
   Serial.print("📉 3h Drop  raw:   "); Serial.print(rawDrop3h, 2);    Serial.println(" hPa");
@@ -801,7 +802,9 @@ void updateGPS() {
   if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
     lastValidAltitude = gps.altitude.meters();
   }
-  gpsHasFix = gps.location.isValid() && !isnan(lastValidAltitude);
+  gpsHasFix = gps.location.isValid() 
+              && !isnan(lastValidAltitude) 
+              && gps.location.age() < GPS_FIX_MAX_AGE_MS;
 
   // Print a summary once per interval
   if (millis() - lastGpsPrint >= GPS_PRINT_INTERVAL) {

@@ -19,6 +19,10 @@ class DataScreen extends StatefulWidget {
   State<DataScreen> createState() => _DataScreenState();
 }
 
+/// Dark red used to mark stale GPS-derived values once the fix is lost: the GPS
+/// and Altitude tile values, plus the corrected-trends "no fix" subtitle.
+const Color _kStaleRed = Color(0xFFB71C1C);
+
 class _DataScreenState extends State<DataScreen> {
   WeatherData? _data;
 
@@ -26,6 +30,12 @@ class _DataScreenState extends State<DataScreen> {
   /// it arrived. Displayed time = anchor + (now − anchorWall), ticked every 1 s.
   int _anchorMonSec = 0;
   DateTime _anchorWall = DateTime.now();
+
+  /// Wall-clock of the most recent frame that reported a GPS fix, used to show
+  /// "last known ~N min ago" while the fix is lost. Null until the first fix is
+  /// seen this session (e.g. the app connected during an outage), in which case
+  /// the minutes are omitted from the subtitle.
+  DateTime? _lastFixWall;
 
   Timer? _ticker;
   StreamSubscription<WeatherData>? _dataSub;
@@ -58,11 +68,27 @@ class _DataScreenState extends State<DataScreen> {
     _data = data;
     _anchorMonSec = data.monitoringSeconds;
     _anchorWall = DateTime.now();
+    // Remember when we last had a fix so the "no fix" subtitle can say how long
+    // ago the shown coordinates/altitude were last valid.
+    if (data.hasFix) _lastFixWall = DateTime.now();
   }
 
   /// Live monitoring time in seconds, extrapolated from the anchor.
   int get _liveMonitoringSec =>
       _anchorMonSec + DateTime.now().difference(_anchorWall).inSeconds;
+
+  /// Subtitle for the altitude-corrected trends card when the GPS fix is lost.
+  /// Shows how long ago the displayed values were last valid; if no fix has been
+  /// seen this session yet, the minutes are omitted.
+  String _noFixSubtitle() {
+    final lastFix = _lastFixWall;
+    if (lastFix == null) {
+      return 'No GPS fix — using last known values';
+    }
+    final n = (DateTime.now().difference(lastFix).inSeconds / 60).round();
+    final minutes = n < 1 ? 1 : n;
+    return 'No GPS fix — last known ~$minutes min ago — using last known values';
+  }
 
   void _leave() {
     if (_popped || !mounted) return;
@@ -190,11 +216,14 @@ class _DataScreenState extends State<DataScreen> {
                 Expanded(child: _GpsCard(data: d)),
                 const SizedBox(width: 12),
                 Expanded(
+                  // Always show the last-known altitude; tint it dark red once the
+                  // fix is lost so it reads as stale rather than live.
                   child: _ReadingCard(
                     icon: Icons.terrain,
                     label: 'Altitude',
-                    value: d.hasFix ? d.altitude.toStringAsFixed(1) : '—',
-                    unit: d.hasFix ? 'm' : '',
+                    value: d.altitude.toStringAsFixed(1),
+                    unit: 'm',
+                    valueColor: d.hasFix ? null : _kStaleRed,
                   ),
                 ),
               ],
@@ -206,10 +235,10 @@ class _DataScreenState extends State<DataScreen> {
               title: 'Altitude-corrected Pressure trends',
               subtitle: d.hasFix
                   ? 'Altitude correction active (GPS fix)'
-                  : 'No GPS fix — showing raw fallback',
+                  : _noFixSubtitle(),
               subtitleColor: d.hasFix
                   ? const Color(0xFF0D47A1) // dark blue: correction active
-                  : const Color(0xFFB71C1C), // dark red: no fix, raw fallback
+                  : _kStaleRed, // dark red: no fix, using last-known values
               data: d,
               drop3h: d.corrDrop3h,
               drop30m: d.corrDrop30m,
@@ -331,12 +360,17 @@ class _ReadingCard extends StatelessWidget {
     required this.label,
     required this.value,
     required this.unit,
+    this.valueColor,
   });
 
   final IconData icon;
   final String label;
   final String value;
   final String unit;
+
+  /// Overrides the value text colour (null keeps the default). Used to tint a
+  /// stale last-known reading (e.g. altitude after the GPS fix is lost).
+  final Color? valueColor;
 
   @override
   Widget build(BuildContext context) {
@@ -363,9 +397,10 @@ class _ReadingCard extends StatelessWidget {
                     children: [
                       TextSpan(
                         text: value,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 28,
                           fontWeight: FontWeight.bold,
+                          color: valueColor,
                         ),
                       ),
                       TextSpan(
@@ -386,7 +421,8 @@ class _ReadingCard extends StatelessWidget {
 }
 
 /// Tile showing the current GPS latitude/longitude, styled like [_ReadingCard].
-/// Shows a "No fix" placeholder until the firmware reports a fix.
+/// Always shows the last-known coordinates; tints them dark red once the fix is
+/// lost so they read as stale rather than live.
 class _GpsCard extends StatelessWidget {
   const _GpsCard({required this.data});
 
@@ -394,6 +430,8 @@ class _GpsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Default colour while the fix is live; dark red once it is lost.
+    final color = data.hasFix ? null : _kStaleRed;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -406,31 +444,25 @@ class _GpsCard extends StatelessWidget {
             // The two coordinate lines are taller than a single value line, so
             // scaleDown shrinks them to fit the shared value-area height — the
             // GPS tile then matches the compact one-line tiles exactly.
+            //
+            // Always show the last-known coordinates; once the fix is lost they
+            // are tinted dark red so they read as stale rather than live.
             SizedBox(
               height: _kTileValueAreaHeight,
               child: FittedBox(
                 fit: BoxFit.scaleDown,
                 alignment: Alignment.centerLeft,
-                child: data.hasFix
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // Fixed-width "Lat:"/"Lon:" labels so both numbers
-                          // start at the same x — first digits align.
-                          _coordRow('Lat:', data.latitude),
-                          const SizedBox(height: 2),
-                          _coordRow('Lon:', data.longitude),
-                        ],
-                      )
-                    : const Text(
-                        'No fix',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black38,
-                        ),
-                      ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Fixed-width "Lat:"/"Lon:" labels so both numbers
+                    // start at the same x — first digits align.
+                    _coordRow('Lat:', data.latitude, color),
+                    const SizedBox(height: 2),
+                    _coordRow('Lon:', data.longitude, color),
+                  ],
+                ),
               ),
             ),
           ],
@@ -440,9 +472,11 @@ class _GpsCard extends StatelessWidget {
   }
 
   /// One coordinate line: a fixed-width label cell + the value, so the values
-  /// of consecutive rows line up at the same starting column.
-  Widget _coordRow(String label, double value) {
-    const style = TextStyle(fontSize: 16, fontWeight: FontWeight.bold);
+  /// of consecutive rows line up at the same starting column. [color] tints the
+  /// whole line (null keeps the default) so a stale last-known fix reads as red.
+  Widget _coordRow(String label, double value, Color? color) {
+    final style =
+        TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color);
     return Row(
       children: [
         SizedBox(width: 38, child: Text(label, style: style)),
