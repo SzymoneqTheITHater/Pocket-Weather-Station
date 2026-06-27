@@ -36,6 +36,12 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_blue_plus: ^2.3.4
   flutter_local_notifications: ^21.0.0
+  another_telephony: ^0.4.0
+  shared_preferences: ^2.3.3
+  # Pinned to 1.x: its includeNonVisibleOnAndroid flag returns contacts that
+  # belong to non-visible groups/labels, which 2.x silently filters out.
+  flutter_contacts: ^1.1.9+2
+  flutter_foreground_task: ^9.2.2
 
 dev_dependencies:
   flutter_test:

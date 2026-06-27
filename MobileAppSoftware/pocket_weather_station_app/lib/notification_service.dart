@@ -5,9 +5,10 @@ import 'weather_data.dart';
 /// Thin wrapper around [FlutterLocalNotificationsPlugin] for posting a local
 /// notification whenever the storm-alert level changes.
 ///
-/// This is a *local* notification: the OS shows it while the app is running and
-/// connected over BLE. Background delivery would require a background BLE
-/// service, which is out of scope for the MVP.
+/// This is a *local* notification: the OS shows it whenever [showAlertChange] is
+/// called from [WeatherBleService]. Delivery continues while the app is
+/// backgrounded because a foreground service ([MonitoringService]) keeps the
+/// process and the BLE listener alive.
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();

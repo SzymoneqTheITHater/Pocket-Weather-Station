@@ -1,15 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import 'app_chrome.dart';
 import 'ble_service.dart';
 import 'weather_data.dart';
 
 /// Live "glorified OLED" view of the device's current readings. Subscribes to
 /// the DATA characteristic via [WeatherBleService] and renders everything the
 /// firmware sends, with a color-coded alert banner and a locally live-ticking
-/// uptime. Pops back to the connection screen if the device disconnects.
+/// uptime. An involuntary disconnect shows a "Reconnecting…" banner (the service
+/// auto-reconnects); leaving is user-driven (Disconnect / back).
 class DataScreen extends StatefulWidget {
   const DataScreen({super.key, required this.service});
 
@@ -39,8 +40,11 @@ class _DataScreenState extends State<DataScreen> {
 
   Timer? _ticker;
   StreamSubscription<WeatherData>? _dataSub;
-  StreamSubscription<BluetoothConnectionState>? _connSub;
-  bool _popped = false;
+  StreamSubscription<WatchStatus>? _statusSub;
+
+  /// True while the link is down but the service is auto-reconnecting; drives the
+  /// "Reconnecting…" banner. The last readings stay on screen meanwhile.
+  bool _isReconnecting = false;
 
   @override
   void initState() {
@@ -52,8 +56,9 @@ class _DataScreenState extends State<DataScreen> {
       if (mounted) setState(() => _applyData(data));
     });
 
-    _connSub = widget.service.connectionState?.listen((state) {
-      if (state == BluetoothConnectionState.disconnected) _leave();
+    _statusSub = widget.service.status.listen((status) {
+      if (!mounted) return;
+      setState(() => _isReconnecting = status == WatchStatus.reconnecting);
     });
 
     // Re-render once per second so the uptime display keeps ticking between
@@ -90,38 +95,67 @@ class _DataScreenState extends State<DataScreen> {
     return 'No GPS fix — last known ~$minutes min ago — using last known values';
   }
 
-  void _leave() {
-    if (_popped || !mounted) return;
-    _popped = true;
-    Navigator.of(context).pop();
-  }
-
   @override
   void dispose() {
     _ticker?.cancel();
     _dataSub?.cancel();
-    _connSub?.cancel();
+    _statusSub?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      // Leaving this screen means we're done with this connection; drop it so
-      // the connection screen starts a fresh scan. Mark _popped first so the
-      // connection-state listener's _leave() can't pop a second time.
+      // Leaving this screen is an intentional disconnect: tear down the
+      // connection (and its foreground service) so it won't auto-reconnect.
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) {
-          _popped = true;
-          widget.service.disconnect();
-        }
+        if (didPop) widget.service.disconnect();
       },
       child: Scaffold(
-        appBar: AppBar(
-          automaticallyImplyLeading: false,
-          title: const Text('Pocket Weather Station'),
+        appBar: buildAppBar(context),
+        // Popping runs the PopScope above (service.disconnect()); WelcomeScreen
+        // disposes the service after its push returns. So Disconnect only needs
+        // to pop.
+        endDrawer: WatcherMenuDrawer(
+          onDisconnect: () => Navigator.of(context).pop(),
         ),
-        body: _data == null ? _waiting() : _content(_data!),
+        body: Column(
+          children: [
+            if (_isReconnecting) _reconnectingBanner(),
+            Expanded(child: _data == null ? _waiting() : _content(_data!)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Slim banner shown while the link dropped and the service is auto-reconnecting.
+  /// The last readings stay visible below it (tinted stale by the GPS logic).
+  Widget _reconnectingBanner() {
+    return Material(
+      color: const Color(0xFFFFF3E0), // soft amber, matches the warning palette
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Reconnecting…',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: Color(0xFFE65100),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
