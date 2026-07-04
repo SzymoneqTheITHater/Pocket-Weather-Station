@@ -141,6 +141,18 @@ bool firstMeasurementDone = false;
 // is NOT bypassed by fast-sim forcing historyFilled every cycle.
 int measurementCount = 0;
 
+// ─── De-escalation hold (anti-flapping) ───────────────────────────────────────
+// Once an alert level is entered, a drop to an EASIER level is suppressed until
+// this many readings have elapsed; escalation to a more dangerous level is always
+// immediate. Counting readings (not millis) ties the hold to the 2-min sample
+// cadence: 5 readings × 2 min = 10 minutes. Stops the level flapping on a threshold.
+#if SIMULATION_FAST == 1
+const int ALERT_DEESCALATE_HOLD_READINGS = 2;   // fast sim: holds a drop for exactly one 15 s cycle
+#else
+const int ALERT_DEESCALATE_HOLD_READINGS = 5;   // 5 × 2 min = 10 minutes (real / slow sim)
+#endif
+int currentAlertEnteredCount = 0;   // measurementCount when currentAlert was last (re)entered
+
 const char* deviceName = "MountainGuide_Weather";
 
 // ─── LED pins ─────────────────────────────────────────────────────────────────
@@ -164,6 +176,13 @@ bool          blinkState    = false;
 const unsigned long SEVERE_BUZZER_DURATION_MS = 10000;
 unsigned long severeBuzzerStartTime = 0;
 bool          buzzerArmed           = false;
+
+// Confirmation beeps on level change to CLEAR/WATCH/WARNING: 1/2/3 beeps.
+// Symmetric 0.5 s on / 0.5 s off, toggled non-blockingly from the main loop.
+const unsigned long CONFIRM_BEEP_PHASE_MS = 500;
+int           confirmPhasesLeft      = 0;      // on/off phases remaining (0 = idle)
+bool          confirmBeepOn          = false;  // buzzer state within the pattern
+unsigned long confirmBeepPhaseStart  = 0;
 
 // ─── Simulation state ─────────────────────────────────────────────────────────
 #if SIMULATION_MODE == 1
@@ -271,6 +290,39 @@ void updateLEDs(AlertLevel alert) {
   digitalWrite(PIN_LED_GREEN,  alert == CLEAR   ? HIGH : LOW);
   digitalWrite(PIN_LED_YELLOW, alert == WATCH   ? HIGH : LOW);
   digitalWrite(PIN_LED_RED,    (alert == WARNING || alert == SEVERE) ? HIGH : LOW);
+}
+
+// ─── Buzzer confirmation beeps ────────────────────────────────────────────────
+// Arm `count` beeps (0.5 s on / 0.5 s off). The pattern is then advanced
+// non-blockingly by handleConfirmBeep() in the main loop, so it does not stall
+// the SEVERE buzzer/LED loop or BLE. Used for CLEAR (1), WATCH (2), WARNING (3).
+// A pattern of N beeps is 2*N-1 phases: on, gap, on, gap, ..., on.
+void startConfirmBeep(int count) {
+  if (count <= 0) {
+    confirmPhasesLeft = 0;
+    digitalWrite(PIN_BUZZER, LOW);
+    return;
+  }
+  confirmPhasesLeft     = 2 * count - 1;
+  confirmBeepOn         = true;
+  confirmBeepPhaseStart = millis();
+  digitalWrite(PIN_BUZZER, HIGH);
+}
+
+// Advance the confirmation-beep pattern; call once per loop iteration.
+void handleConfirmBeep() {
+  if (confirmPhasesLeft == 0) return;
+  unsigned long now = millis();
+  if (now - confirmBeepPhaseStart < CONFIRM_BEEP_PHASE_MS) return;
+
+  confirmBeepPhaseStart = now;
+  confirmPhasesLeft--;
+  if (confirmPhasesLeft == 0) {
+    digitalWrite(PIN_BUZZER, LOW);   // pattern finished
+  } else {
+    confirmBeepOn = !confirmBeepOn;  // toggle between beep and gap
+    digitalWrite(PIN_BUZZER, confirmBeepOn ? HIGH : LOW);
+  }
 }
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
@@ -485,12 +537,32 @@ updateGPS();
     batteryPct = readBatteryPercent();
     updateBatteryLEDs(batteryPct);
 
-    AlertLevel newAlert = analyzeWeatherData(pressure, humidity, temperature);
+    AlertLevel measuredAlert = analyzeWeatherData(pressure, humidity, temperature);
     // Warmup gate: hold the level at UNKNOWN until the 30-min window is valid
     // (needs SAMPLES_30MIN + 1 real samples). analyzeWeatherData() still runs and
     // computes the underlying level — we just don't trust/emit it yet.
     bool warmupComplete = (measurementCount > SAMPLES_30MIN);
-    if (!warmupComplete) newAlert = UNKNOWN;
+    if (!warmupComplete) measuredAlert = UNKNOWN;
+
+    // De-escalation hold: escalation to a more dangerous level applies immediately,
+    // but a drop to an easier level is suppressed until currentAlert has been held
+    // for ALERT_DEESCALATE_HOLD_READINGS readings. UNKNOWN (warmup) is exempt so the
+    // first real level appears promptly. Relies on CLEAR<WATCH<WARNING<SEVERE (0<1<2<3).
+    AlertLevel newAlert = measuredAlert;
+    if (currentAlert != UNKNOWN && measuredAlert != UNKNOWN &&
+        (int)measuredAlert < (int)currentAlert &&
+        (measurementCount - currentAlertEnteredCount) < ALERT_DEESCALATE_HOLD_READINGS) {
+      newAlert = currentAlert;   // hold the more dangerous level for now
+      Serial.print("⏳ De-escalation held: keeping ");
+      Serial.print(getAlertName(currentAlert));
+      Serial.print(" over ");
+      Serial.print(getAlertName(measuredAlert));
+      Serial.print(" (");
+      Serial.print(measurementCount - currentAlertEnteredCount);
+      Serial.print("/");
+      Serial.print(ALERT_DEESCALATE_HOLD_READINGS);
+      Serial.println(" readings)");
+    }
 
     sendDataViaBluetooth(temperature, pressure, humidity, newAlert, batteryPct);
 
@@ -507,14 +579,27 @@ updateGPS();
       Serial.print(" → ");
       Serial.println(getAlertName(newAlert));
       currentAlert = newAlert;
+      currentAlertEnteredCount = measurementCount;   // restart the de-escalation hold window
       updateLEDs(currentAlert);
 
+      // Buzzer feedback on every level change (except UNKNOWN):
+      //   SEVERE  → intermittent beeps synced with the red LED for 10 s
+      //   WARNING → three 0.5 s beeps
+      //   WATCH   → two 0.5 s beeps
+      //   CLEAR   → one 0.5 s beep
       if (newAlert == SEVERE) {
+        confirmPhasesLeft = 0;   // cancel any in-flight confirmation beeps
         severeBuzzerStartTime = millis();
         buzzerArmed = true;
       } else {
         buzzerArmed = false;
         digitalWrite(PIN_BUZZER, LOW);
+        switch (newAlert) {
+          case WARNING: startConfirmBeep(3); break;
+          case WATCH:   startConfirmBeep(2); break;
+          case CLEAR:   startConfirmBeep(1); break;
+          default:      break;  // UNKNOWN: stay silent
+        }
       }
     }
 
@@ -540,6 +625,9 @@ updateGPS();
       }
     }
   }
+
+  // Non-blocking confirmation beeps for CLEAR/WATCH/WARNING transitions.
+  handleConfirmBeep();
 
   delay(100);
 }

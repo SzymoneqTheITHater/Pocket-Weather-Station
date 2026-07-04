@@ -7,8 +7,8 @@ import 'ble_service.dart';
 import 'data_screen.dart';
 
 /// The home screen. Unlike the old auto-connecting flow, the user connects
-/// manually with a button. Connecting happens inline in the header (the rest of
-/// the screen stays put) so future "saved session/trip" tiles can live below it.
+/// manually with a button, centred as the focal point of the screen. Connecting
+/// happens inline in the header, so the rest of the screen stays put.
 ///
 /// Ports the connection logic from the former ConnectionScreen: the 5 s hint and
 /// 10 s timeout timers and the [_attemptId] race guard that stops a stale
@@ -127,19 +127,11 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     return Scaffold(
       appBar: buildAppBar(context),
       endDrawer: const WatcherMenuDrawer(), // no Disconnect on the welcome screen
-      body: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 32),
-        children: [
-          _connectHeader(),
-          const SizedBox(height: 48),
-          // Reserved space for future "saved session/trip" tiles.
-          Center(
-            child: const Text(
-              'Saved trips will appear here',
-              style: TextStyle(fontSize: 13, color: Colors.black26),
-            ),
-          ),
-        ],
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 32),
+          child: _connectHeader(),
+        ),
       ),
     );
   }
