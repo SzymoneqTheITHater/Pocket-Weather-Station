@@ -276,6 +276,7 @@ class _DataScreenState extends State<DataScreen> {
               data: d,
               drop3h: d.corrDrop3h,
               drop30m: d.corrDrop30m,
+              rise10m: d.corrRise10m,
             ),
             const SizedBox(height: 12),
             _DropsCard(
@@ -283,6 +284,7 @@ class _DataScreenState extends State<DataScreen> {
               data: d,
               drop3h: d.drop3h,
               drop30m: d.drop30m,
+              rise10m: d.rise10m,
             ),
             const SizedBox(height: 12),
             _UptimeCard(monitoringSeconds: _liveMonitoringSec),
@@ -530,6 +532,7 @@ class _DropsCard extends StatelessWidget {
     required this.data,
     required this.drop3h,
     required this.drop30m,
+    required this.rise10m,
     this.subtitle,
     this.subtitleColor = Colors.black54,
   });
@@ -538,6 +541,7 @@ class _DropsCard extends StatelessWidget {
   final WeatherData data;
   final double drop3h;
   final double drop30m;
+  final double rise10m;
   final String? subtitle;
   final Color subtitleColor;
 
@@ -570,6 +574,9 @@ class _DropsCard extends StatelessWidget {
             const Divider(height: 24),
             _dropRow('30-minute drop', data.drop30mReady, drop30m,
                 data.drop30mReadyInMin),
+            const Divider(height: 24),
+            _dropRow('10-minute rise', data.rise10mReady, rise10m,
+                data.rise10mReadyInMin),
           ],
         ),
       ),

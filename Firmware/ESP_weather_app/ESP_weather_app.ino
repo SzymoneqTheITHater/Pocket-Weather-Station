@@ -1,5 +1,5 @@
 /*
- * THUNDERSTORM DETECTION SYSTEM
+ * STORM DETECTION SYSTEM
  * For Mountain Guide Safety - Engineering Thesis
  *
  * Hardware:
@@ -84,12 +84,39 @@ bool        historyFilled            = false;
 const int   SAMPLES_30MIN            = 15;
 
 const float WARNING_PRESSURE_THRESHOLD  = 3.0;
-const float WARNING_HUMIDITY_THRESHOLD       = 75.0;
 const float RAPID_PRESSURE_DROP      = 1.5;
 const float WATCH_PRESSURE_THRESHOLD     = 1.8;
-const float WATCH_HUMIDITY_THRESHOLD = 70.0;
 const float WATCH_RECENT_DROP        = 1.0;
 const float WARNING_RECENT_DROP      = 1.25;
+
+// ── Gust-front (convective arrival) detection ────────────────────────────────
+// Both signals are evaluated over ONE shared window so they describe the same
+// air-mass event. 5 samples × 2 min = 10 minutes.
+//
+// Pressure rise: a thunderstorm downdraft builds a surface mesohigh; documented
+// gust-front pressure jumps are ~0.5–2 hPa over 2–5 min (Bedard & Meade 1977,
+// J. Appl. Meteor.), mesohigh magnitude ~1–6 hPa (Stull, Practical Meteorology).
+// At 2-min sampling a 2–5 min jump is smeared across the window, so 1.0 hPa
+// over 10 min is a deliberately conservative catch-all.
+//
+// Temperature drop: outflow air is evaporatively cooled; gust-front passage
+// brings a sharp temperature fall ahead of precipitation. 3.0 °C in 10 min
+// keeps margin over the ~1–1.5 °C ambient-lapse cooling of a hard 10 min climb
+// (~100–150 m), so hiking uphill cannot fake it. Note the two conditions also
+// self-protect: descent raises pressure but WARMS the air; ascent cools the
+// air but DROPS pressure — elevation change can never satisfy both at once.
+const int   SAMPLES_10MIN            = 5;      // shared window (10 min @ 2-min cadence)
+const float GUST_PRESSURE_RISE_10MIN = 1.0;    // hPa, altitude-CORRECTED rise
+const float GUST_TEMP_DROP_10MIN     = 3.0;    // °C fall over the same window
+
+// ── Moisture via dew point (replaces the RH gate) ────────────────────────────
+// Surface dew point is a standard pre-convective moisture discriminator
+// (e.g. Ćurić & Janc 2016, Atmos. Res. — Belgrade stability-index study).
+// ~15 °C is a common warm-season convective guide near sea level; ambient dew
+// point falls ~2 °C per km of altitude, so the threshold is height-adjusted
+// to stay meaningful on a ridge.
+const float DEWPOINT_CONVECTIVE_SL   = 15.0;   // °C threshold at sea level
+const float DEWPOINT_LAPSE_PER_KM    = 2.0;    // °C reduction per km altitude
 
 // ─── Altitude-pressure correction (Stage 4, option B) ────────────────────────
 // GPS altitude lets us subtract the pressure change caused by the guide moving
@@ -102,6 +129,7 @@ const float GRAVITY        = 9.80665;   // m/s^2
 const float R_DRY_AIR      = 287.05;    // J/(kg·K), specific gas constant, dry air
 
 float  altitudeHistory[HISTORY_SIZE];   // parallel to pressureHistory; NAN = no fix
+float  temperatureHistory[HISTORY_SIZE]; // parallel to pressureHistory; NAN until real samples exist
 float  lastValidAltitude = NAN;         // metres MSL, NAN until first valid fix
 double lastValidLat      = 0.0;
 double lastValidLng      = 0.0;
@@ -194,8 +222,8 @@ const int SIM_STEPS    = 4;
 #else
 // Slow mode: pressure starts high and drops gradually
 float simPressure      = 1013.0;
-float simHumidity      = 60.0;
-float simTemperature   = 18.0;
+float simHumidity      = 65.0;
+float simTemperature   = 20.0;
 int   simTickCount     = 0;
 #endif
 
@@ -219,10 +247,10 @@ void getSimulatedReadings(float &temperature, float &pressure, float &humidity) 
       humidity    = 78.0;
       temperature = 15.0;
       break;
-    case 3:  // SEVERE — rapid 30-min drop + high humidity
+    case 3:  // SEVERE — rapid 30-min drop + warm moist air (dew point ≈ 18 °C ≥ 15)
       pressure    = 1008.0;
-      humidity    = 85.0;
-      temperature = 13.0;
+      humidity    = 90.0;
+      temperature = 20.0;
       break;
   }
   // Manually override pressure history to force the correct alert level
@@ -254,27 +282,32 @@ void getSimulatedReadings(float &temperature, float &pressure, float &humidity) 
   simStep++;
 
 #else
-  // Slow mode: pressure drops naturally over time
-  // Phase 1 (ticks 0–5):   stable, CLEAR
-  // Phase 2 (ticks 6–15):  humidity rises, WATCH triggered
-  // Phase 3 (ticks 16–30): pressure drops steadily, WARNING triggered
-  // Phase 4 (ticks 31+):   rapid pressure drop, SEVERE triggered
+  // Slow mode: pressure drops naturally over time (v3 tuning).
+  // The 3 h window only fills after tick 91, so before that the level rides
+  // entirely on the 30-min branches, which need the dew-point moisture gate
+  // (>= 15 °C, altitude unknown in sim). Warm-sector setup: warm moist air
+  // ahead of the storm makes 'moist' true from phase 3 on, and the growing
+  // 30-min drop then walks the tiers: 1.0 → 1.25 → 1.5 hPa.
+  // Phase 1 (ticks 0–5):   stable, warm — CLEAR (UNKNOWN during 32-min warmup)
+  // Phase 2 (ticks 6–15):  gentle fall, humidity rising — CLEAR (dew point < 15)
+  // Phase 3 (ticks 16–30): steady fall, moist — WATCH ~tick 20, WARNING ~tick 27
+  // Phase 4 (ticks 31+):   rapid fall, very moist — SEVERE
   if (simTickCount < 6) {
     simPressure   = 1013.0;
-    simHumidity   = 55.0 + simTickCount * 1.0;
-    simTemperature = 18.0;
+    simHumidity   = 65.0 + simTickCount * 1.0;
+    simTemperature = 20.0;
   } else if (simTickCount < 16) {
-    simPressure   = 1013.0 - (simTickCount - 6) * 0.18;
-    simHumidity   = 61.0 + (simTickCount - 6) * 1.5;
-    simTemperature = 18.0 - (simTickCount - 6) * 0.1;
+    simPressure   = 1013.0 - (simTickCount - 5) * 0.06;
+    simHumidity   = min(70.0 + (simTickCount - 6) * 0.6, 75.0);
+    simTemperature = 20.0;
   } else if (simTickCount < 31) {
-    simPressure   = 1011.2 - (simTickCount - 16) * 0.22;
-    simHumidity   = min(simHumidity + 1.0, 92.0);
-    simTemperature = 16.5 - (simTickCount - 16) * 0.15;
+    simPressure   = 1012.4 - (simTickCount - 15) * 0.09;
+    simHumidity   = min(simHumidity + 1.0, 90.0);
+    simTemperature = 19.5;
   } else {
     simPressure   = max(simPressure - 0.5, 990.0);
     simHumidity   = min(simHumidity + 0.5, 95.0);
-    simTemperature = max(simTemperature - 0.2, 5.0);
+    simTemperature = max(simTemperature - 0.2, 17.0);
   }
   simTickCount++;
   pressure    = simPressure;
@@ -333,6 +366,11 @@ void       computeCorrectedDrops(float pressure, float temperature,
                                  float &rawDrop3h, float &rawDrop30min,
                                  float &corrDrop3h, float &corrDrop30min,
                                  bool &applied3h, bool &applied30m);
+float      dewPointC(float tempC, float relHumidity);
+bool       isConvectivelyMoist(float tempC, float relHumidity);
+void       computeGustFrontSignals(float pressure, float temperature,
+                                   float &rawRise10min, float &pressureRise10min,
+                                   float &tempDrop10min, bool &valid);
 void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 String     getAlertName(AlertLevel alert);
 void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
@@ -349,7 +387,7 @@ void setup() {
 
   Serial.println("\n╔════════════════════════════════════════════╗");
   Serial.println("║  MOUNTAIN GUIDE WEATHER MONITORING SYSTEM  ║");
-  Serial.println("║     Thunderstorm Detection v2.0 (BLE)      ║");
+  Serial.println("║     Thunderstorm Detection v3.0 (BLE)      ║");
   Serial.println("╚════════════════════════════════════════════╝\n");
 
   setupGPS();
@@ -406,7 +444,7 @@ void setup() {
   // ─── BLE init (NimBLE GATT peripheral) ──────────────────────────────────────
   Serial.print("Initializing BLE... ");
   NimBLEDevice::init(deviceName);
-  NimBLEDevice::setMTU(247);   // allow notifications big enough for the JSON payload
+  NimBLEDevice::setMTU(512);   // allow notifications big enough for the JSON payload (app requests 512)
 
   NimBLEServer* pServer = NimBLEDevice::createServer();
   pServer->advertiseOnDisconnect(true);   // auto re-advertise after a phone disconnects
@@ -487,6 +525,10 @@ void setup() {
 
   for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = initialPressure;
   for (int i = 0; i < HISTORY_SIZE; i++) altitudeHistory[i] = NAN;  // filled once GPS has a fix
+  // NAN (not backfill): the gust-front check must simply stay inert until
+  // 10 min of REAL temperatures exist, mirroring the altitude-correction
+  // NAN convention.
+  for (int i = 0; i < HISTORY_SIZE; i++) temperatureHistory[i] = NAN;
 
   Serial.println("\n✓ System initialized successfully!");
   Serial.println("Starting atmospheric monitoring...\n");
@@ -528,8 +570,9 @@ updateGPS();
     // In fast sim mode, history is managed inside getSimulatedReadings()
     // In all other modes, update history normally
 #if !(SIMULATION_MODE == 1 && SIMULATION_FAST == 1)
-    pressureHistory[historyIndex] = pressure;
-    altitudeHistory[historyIndex] = lastValidAltitude;  // NAN if no fix → correction skips this window
+    pressureHistory[historyIndex]    = pressure;
+    altitudeHistory[historyIndex]    = lastValidAltitude;  // NAN if no fix → correction skips this window
+    temperatureHistory[historyIndex] = temperature;
     historyIndex = (historyIndex + 1) % HISTORY_SIZE;
     if (historyIndex == 0) historyFilled = true;
 #endif
@@ -632,10 +675,16 @@ updateGPS();
   delay(100);
 }
 
-// ─── Algorithm (now altitude-aware) ──────────────────────────────────────────
-// Thresholds are unchanged and still physically meaningful. What changed: the
-// drops fed into them are CORRECTED for elevation change, so climbing/descending
-// no longer masquerades as a weather pressure trend.
+// ─── Algorithm v3 (altitude-aware, dew-point moisture, gust-front SEVERE) ────
+// Tier structure vs v2:
+//  * Moisture is dew-point based and STRENGTHENS the short-window branches
+//    instead of vetoing everything: a >=3 hPa/3h synoptic fall reaches WARNING
+//    on its own (fixes the v2 inconsistency where a large dry fall could never
+//    leave WATCH, while WATCH's own 3h branch had no moisture condition).
+//  * New independent SEVERE path: gust-front signature (pressure RISE + temp
+//    fall over the shared 10-min window) — covers the convective arrival case
+//    the falling-barometer logic is blind to. Short lead time by nature
+//    (minutes, not hours): a "get off the ridge NOW" signal, not a forecast.
 AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature) {
 
   float rawDrop3h, rawDrop30min, pressureDrop3h, pressureDrop30min;
@@ -645,15 +694,27 @@ AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature)
                         pressureDrop3h, pressureDrop30min,
                         applied3h, applied30m);
 
+  // Moisture: dew-point based, altitude-adjusted (replaces RH >= 75 / >= 70).
+  bool moist = isConvectivelyMoist(temperature, humidity);
+
+  // Gust-front signature — both signals over the SAME 10-min window.
+  float rawRise10, rise10, tDrop10;
+  bool  gustValid;
+  computeGustFrontSignals(pressure, temperature, rawRise10, rise10, tDrop10, gustValid);
+  bool gustFront = gustValid &&
+                   rise10  >= GUST_PRESSURE_RISE_10MIN &&
+                   tDrop10 >= GUST_TEMP_DROP_10MIN;
+
   AlertLevel alert = CLEAR;
 
-  if (pressureDrop30min >= RAPID_PRESSURE_DROP && humidity >= WARNING_HUMIDITY_THRESHOLD) {
+  if (gustFront ||
+      (pressureDrop30min >= RAPID_PRESSURE_DROP && moist)) {
     alert = SEVERE;
-  } else if ((pressureDrop3h >= WARNING_PRESSURE_THRESHOLD || pressureDrop30min >= WARNING_RECENT_DROP) &&
-            humidity >= WARNING_HUMIDITY_THRESHOLD) {
+  } else if (pressureDrop3h >= WARNING_PRESSURE_THRESHOLD ||
+             (pressureDrop30min >= WARNING_RECENT_DROP && moist)) {
     alert = WARNING;
   } else if (pressureDrop3h >= WATCH_PRESSURE_THRESHOLD ||
-            (pressureDrop30min >= WATCH_RECENT_DROP && humidity >= WATCH_HUMIDITY_THRESHOLD)) {
+             (pressureDrop30min >= WATCH_RECENT_DROP && moist)) {
     alert = WATCH;
   }
 
@@ -688,6 +749,72 @@ void computeDrops(float pressure, float &drop3h, float &drop30min) {
 float pressurePerMeter(float pressure_hPa, float temp_C) {
   float T_kelvin = temp_C + 273.15;
   return (pressure_hPa * GRAVITY) / (R_DRY_AIR * T_kelvin);
+}
+
+// ─── Dew point helpers (v3) ───────────────────────────────────────────────────
+// Magnus formula (Sonntag coefficients; Alduchov & Eskridge 1996). Valid to
+// well below 0 °C, more than adequate for BME280 accuracy.
+float dewPointC(float tempC, float relHumidity) {
+  if (relHumidity <= 0.0f) return -273.15f;          // degenerate input guard
+  const float a = 17.62f, b = 243.12f;
+  float gamma = logf(relHumidity / 100.0f) + (a * tempC) / (b + tempC);
+  return (b * gamma) / (a - gamma);
+}
+
+// Altitude-adjusted convective moisture check.
+// Falls back to the sea-level threshold if altitude is unknown (simulation).
+bool isConvectivelyMoist(float tempC, float relHumidity) {
+  float threshold = DEWPOINT_CONVECTIVE_SL;
+  if (!isnan(lastValidAltitude)) {
+    threshold -= DEWPOINT_LAPSE_PER_KM * (lastValidAltitude / 1000.0f);
+  }
+  return dewPointC(tempC, relHumidity) >= threshold;
+}
+
+// ─── Gust-front signals (v3) — one shared 10-minute window for BOTH conditions ─
+// Computes, over the SAME lookback sample:
+//   rawRise10min      : raw pressure CHANGE, positive = rise (debug/thesis
+//                       comparison; needs only pressure history, so it is
+//                       filled even when the corrected signal is invalid)
+//   pressureRise10min : altitude-corrected pressure CHANGE, sign flipped so
+//                       positive = rise (mesohigh building)
+//   tempDrop10min     : temperature FALL, positive = cooling (outflow air)
+// valid == false until the window has real data (incl. a real old temperature
+// and — for the corrected rise — a real old altitude).
+//
+// Altitude correction is mandatory here: descending ~9 m already produces a
+// ~1 hPa raw rise, which would fake the mesohigh signature. Temperature is
+// left uncorrected; see threshold margin note at the constants.
+void computeGustFrontSignals(float pressure, float temperature,
+                             float &rawRise10min, float &pressureRise10min,
+                             float &tempDrop10min, bool  &valid) {
+  rawRise10min      = 0.0f;
+  pressureRise10min = 0.0f;
+  tempDrop10min     = 0.0f;
+  valid             = false;
+
+  // Window must exist (same guard style as computeDrops's 30-min branch).
+  if (!(historyFilled || historyIndex >= SAMPLES_10MIN + 1)) return;
+
+  int cur   = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+  int idx10 = (cur - SAMPLES_10MIN + HISTORY_SIZE) % HISTORY_SIZE;
+
+  // Raw pressure change over the window, positive = RISE.
+  rawRise10min = pressure - pressureHistory[idx10];
+
+  float tempOld = temperatureHistory[idx10];
+  float altOld  = altitudeHistory[idx10];
+  if (isnan(tempOld) || isnan(altOld) || isnan(lastValidAltitude)) return;
+
+  // Remove the elevation component (same physics as computeCorrectedDrops):
+  // climbing dH metres lowers pressure by perMeter*dH, so the weather-only
+  // rise is rawRise + perMeter*dH.
+  float perMeter = pressurePerMeter(pressure, temperature);
+  float dH       = lastValidAltitude - altOld;         // +climb, −descent
+  pressureRise10min = rawRise10min + perMeter * dH;
+
+  tempDrop10min = tempOld - temperature;               // positive = cooling
+  valid = true;
 }
 
 // Computes both the raw drops and the elevation-corrected drops over the same
@@ -748,6 +875,14 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
   computeCorrectedDrops(pressure, temp, rawDrop3h, rawDrop30min,
                         corrDrop3h, corrDrop30min, applied3h, applied30m);
 
+  // 10-min gust-front window. Mirrors the cp_drop_* fallback semantics: when the
+  // corrected rise can't be computed (no temp/altitude history yet), send the
+  // raw value as the corrected one.
+  float rawRise10, corrRise10, tDrop10;
+  bool  gustValid;
+  computeGustFrontSignals(pressure, temp, rawRise10, corrRise10, tDrop10, gustValid);
+  if (!gustValid) corrRise10 = rawRise10;
+
   // Device uptime in seconds (rollover-proof: esp_timer is 64-bit microseconds).
   uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
   // Monitoring time in seconds: elapsed since the first real measurement (0 until then).
@@ -760,17 +895,21 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
 
   // p_drop_*  = raw drops (kept for the app + thesis comparison)
   // cp_drop_* = altitude-corrected drops actually used by the alert logic
+  // p_rise_10m / cp_rise_10m = raw / altitude-corrected 10-min pressure rise
+  //   (gust-front window; cp falls back to raw until temp+alt history exists)
   // up_s = uptime since boot; mon_s = time since first measurement (drives app countdown)
   // fix/lat/lon/alt = GPS context (Stage 4 app addition)
-  char json[288];
+  char json[336];
   snprintf(json, sizeof(json),
     "{\"temp\":%.1f,\"pressure\":%.2f,\"humidity\":%.1f,\"alert\":%d,"
     "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,"
     "\"cp_drop_3h\":%.2f,\"cp_drop_30m\":%.2f,"
+    "\"p_rise_10m\":%.2f,\"cp_rise_10m\":%.2f,"
     "\"bat\":%d,\"up_s\":%lu,\"mon_s\":%lu,"
     "\"fix\":%d,\"lat\":%.5f,\"lon\":%.5f,\"alt\":%.1f}",
     temp, pressure, humidity, (int)alert,
     rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min,
+    rawRise10, corrRise10,
     batteryPct, (unsigned long)uptimeSec, (unsigned long)monSec,
     fix, lastValidLat, lastValidLng, altOut);
 
@@ -827,6 +966,24 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
   Serial.print("📉 30m Drop raw:   "); Serial.print(rawDrop30min, 2); Serial.println(" hPa");
   Serial.print("📉 30m Drop corr:  "); Serial.print(corrDrop30min, 2);
   Serial.println(applied30m ? " hPa  (alt-corrected)" : " hPa  (no correction)");
+
+  // v3 signals: dew-point moisture gate + gust-front window
+  float dpThreshold = DEWPOINT_CONVECTIVE_SL;
+  if (!isnan(lastValidAltitude)) dpThreshold -= DEWPOINT_LAPSE_PER_KM * (lastValidAltitude / 1000.0f);
+  Serial.print("💧 Dew point:      "); Serial.print(dewPointC(temp, humidity), 1);
+  Serial.print(" °C  ("); Serial.print(isConvectivelyMoist(temp, humidity) ? "MOIST" : "dry");
+  Serial.print(", threshold "); Serial.print(dpThreshold, 1); Serial.println(" °C)");
+
+  float rawRise10, rise10, tDrop10;
+  bool  gustValid;
+  computeGustFrontSignals(pressure, temp, rawRise10, rise10, tDrop10, gustValid);
+  Serial.print("🌬  10m P rise raw: "); Serial.print(rawRise10, 2); Serial.println(" hPa");
+  if (gustValid) {
+    Serial.print("🌬  10m P rise corr:"); Serial.print(rise10, 2);  Serial.println(" hPa  (alt-corrected)");
+    Serial.print("🌬  10m Temp drop:  "); Serial.print(tDrop10, 2); Serial.println(" °C");
+  } else {
+    Serial.println("🌬  Gust front:     inactive (needs 10 min of temp + altitude history)");
+  }
   Serial.print("📝 History:        ");
   Serial.print(historyFilled ? HISTORY_SIZE : historyIndex);
   Serial.println(" samples");

@@ -11,6 +11,9 @@ import 'package:flutter/material.dart';
 const int kDrop30mReadyMonitoringSec = 30 * 60; // 1800 s
 const int kDrop3hReadyMonitoringSec = 180 * 60; // 10800 s
 
+/// The 10-min gust-front rise needs SAMPLES_10MIN (5) intervals of 2 min.
+const int kRise10mReadyMonitoringSec = 10 * 60; // 600 s
+
 /// The storm-alert levels emitted by the firmware (JSON field `alert`).
 /// UNKNOWN (4) is sent while the device is warming up — a real verdict can't be
 /// trusted until the 30-min pressure window is valid (~30 min after boot).
@@ -50,8 +53,9 @@ enum AlertLevel {
 
 /// A single current-reading snapshot parsed from the DATA characteristic JSON:
 /// `{"temp","pressure","humidity","alert","p_drop_3h","p_drop_30m","cp_drop_3h",
-/// "cp_drop_30m","bat","up_s","mon_s","fix","lat","lon","alt"}`. `up_s` (power-on
-/// uptime) is sent by the firmware but unused here; readiness uses `mon_s`.
+/// "cp_drop_30m","p_rise_10m","cp_rise_10m","bat","up_s","mon_s","fix","lat",
+/// "lon","alt"}`. `up_s` (power-on uptime) is sent by the firmware but unused
+/// here; readiness uses `mon_s`.
 class WeatherData {
   const WeatherData({
     required this.temperature,
@@ -64,6 +68,8 @@ class WeatherData {
     required this.monitoringSeconds,
     this.corrDrop3h = 0.0,
     this.corrDrop30m = 0.0,
+    this.rise10m = 0.0,
+    this.corrRise10m = 0.0,
     this.hasFix = false,
     this.latitude = 0.0,
     this.longitude = 0.0,
@@ -82,6 +88,8 @@ class WeatherData {
   // ─── GPS / altitude-correction context (Stage 4) ───────────────────────────
   final double corrDrop3h; // cp_drop_3h — altitude-corrected (== raw when no fix)
   final double corrDrop30m; // cp_drop_30m — altitude-corrected (== raw when no fix)
+  final double rise10m; // p_rise_10m — raw 10-min pressure rise (gust-front window)
+  final double corrRise10m; // cp_rise_10m — altitude-corrected (== raw when no fix)
   final bool hasFix; // fix == 1
   final double latitude; // lat
   final double longitude; // lon
@@ -93,6 +101,9 @@ class WeatherData {
   /// True once monitoring has run long enough for the 3-h drop to be valid.
   bool get drop3hReady => monitoringSeconds >= kDrop3hReadyMonitoringSec;
 
+  /// True once monitoring has run long enough for the 10-min rise to be valid.
+  bool get rise10mReady => monitoringSeconds >= kRise10mReadyMonitoringSec;
+
   /// Remaining minutes until the 30-min drop is valid (0 once ready).
   int get drop30mReadyInMin =>
       ((kDrop30mReadyMonitoringSec - monitoringSeconds) / 60)
@@ -102,6 +113,12 @@ class WeatherData {
   /// Remaining minutes until the 3-h drop is valid (0 once ready).
   int get drop3hReadyInMin =>
       ((kDrop3hReadyMonitoringSec - monitoringSeconds) / 60)
+          .ceil()
+          .clamp(0, 9999);
+
+  /// Remaining minutes until the 10-min rise is valid (0 once ready).
+  int get rise10mReadyInMin =>
+      ((kRise10mReadyMonitoringSec - monitoringSeconds) / 60)
           .ceil()
           .clamp(0, 9999);
 
@@ -122,6 +139,8 @@ class WeatherData {
         monitoringSeconds: _toInt(decoded['mon_s']),
         corrDrop3h: _toDouble(decoded['cp_drop_3h']),
         corrDrop30m: _toDouble(decoded['cp_drop_30m']),
+        rise10m: _toDouble(decoded['p_rise_10m']),
+        corrRise10m: _toDouble(decoded['cp_rise_10m']),
         hasFix: _toInt(decoded['fix']) == 1,
         latitude: _toDouble(decoded['lat']),
         longitude: _toDouble(decoded['lon']),
