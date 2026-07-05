@@ -369,8 +369,8 @@ void       computeCorrectedDrops(float pressure, float temperature,
 float      dewPointC(float tempC, float relHumidity);
 bool       isConvectivelyMoist(float tempC, float relHumidity);
 void       computeGustFrontSignals(float pressure, float temperature,
-                                   float &pressureRise10min, float &tempDrop10min,
-                                   bool &valid);
+                                   float &rawRise10min, float &pressureRise10min,
+                                   float &tempDrop10min, bool &valid);
 void       sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
 String     getAlertName(AlertLevel alert);
 void       printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert, int batteryPct);
@@ -444,7 +444,7 @@ void setup() {
   // ─── BLE init (NimBLE GATT peripheral) ──────────────────────────────────────
   Serial.print("Initializing BLE... ");
   NimBLEDevice::init(deviceName);
-  NimBLEDevice::setMTU(247);   // allow notifications big enough for the JSON payload
+  NimBLEDevice::setMTU(512);   // allow notifications big enough for the JSON payload (app requests 512)
 
   NimBLEServer* pServer = NimBLEDevice::createServer();
   pServer->advertiseOnDisconnect(true);   // auto re-advertise after a phone disconnects
@@ -698,9 +698,9 @@ AlertLevel analyzeWeatherData(float pressure, float humidity, float temperature)
   bool moist = isConvectivelyMoist(temperature, humidity);
 
   // Gust-front signature — both signals over the SAME 10-min window.
-  float rise10, tDrop10;
+  float rawRise10, rise10, tDrop10;
   bool  gustValid;
-  computeGustFrontSignals(pressure, temperature, rise10, tDrop10, gustValid);
+  computeGustFrontSignals(pressure, temperature, rawRise10, rise10, tDrop10, gustValid);
   bool gustFront = gustValid &&
                    rise10  >= GUST_PRESSURE_RISE_10MIN &&
                    tDrop10 >= GUST_TEMP_DROP_10MIN;
@@ -773,6 +773,9 @@ bool isConvectivelyMoist(float tempC, float relHumidity) {
 
 // ─── Gust-front signals (v3) — one shared 10-minute window for BOTH conditions ─
 // Computes, over the SAME lookback sample:
+//   rawRise10min      : raw pressure CHANGE, positive = rise (debug/thesis
+//                       comparison; needs only pressure history, so it is
+//                       filled even when the corrected signal is invalid)
 //   pressureRise10min : altitude-corrected pressure CHANGE, sign flipped so
 //                       positive = rise (mesohigh building)
 //   tempDrop10min     : temperature FALL, positive = cooling (outflow air)
@@ -783,8 +786,9 @@ bool isConvectivelyMoist(float tempC, float relHumidity) {
 // ~1 hPa raw rise, which would fake the mesohigh signature. Temperature is
 // left uncorrected; see threshold margin note at the constants.
 void computeGustFrontSignals(float pressure, float temperature,
-                             float &pressureRise10min, float &tempDrop10min,
-                             bool  &valid) {
+                             float &rawRise10min, float &pressureRise10min,
+                             float &tempDrop10min, bool  &valid) {
+  rawRise10min      = 0.0f;
   pressureRise10min = 0.0f;
   tempDrop10min     = 0.0f;
   valid             = false;
@@ -795,19 +799,19 @@ void computeGustFrontSignals(float pressure, float temperature,
   int cur   = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
   int idx10 = (cur - SAMPLES_10MIN + HISTORY_SIZE) % HISTORY_SIZE;
 
+  // Raw pressure change over the window, positive = RISE.
+  rawRise10min = pressure - pressureHistory[idx10];
+
   float tempOld = temperatureHistory[idx10];
   float altOld  = altitudeHistory[idx10];
   if (isnan(tempOld) || isnan(altOld) || isnan(lastValidAltitude)) return;
-
-  // Raw pressure change over the window, positive = RISE.
-  float rawRise = pressure - pressureHistory[idx10];
 
   // Remove the elevation component (same physics as computeCorrectedDrops):
   // climbing dH metres lowers pressure by perMeter*dH, so the weather-only
   // rise is rawRise + perMeter*dH.
   float perMeter = pressurePerMeter(pressure, temperature);
   float dH       = lastValidAltitude - altOld;         // +climb, −descent
-  pressureRise10min = rawRise + perMeter * dH;
+  pressureRise10min = rawRise10min + perMeter * dH;
 
   tempDrop10min = tempOld - temperature;               // positive = cooling
   valid = true;
@@ -871,6 +875,14 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
   computeCorrectedDrops(pressure, temp, rawDrop3h, rawDrop30min,
                         corrDrop3h, corrDrop30min, applied3h, applied30m);
 
+  // 10-min gust-front window. Mirrors the cp_drop_* fallback semantics: when the
+  // corrected rise can't be computed (no temp/altitude history yet), send the
+  // raw value as the corrected one.
+  float rawRise10, corrRise10, tDrop10;
+  bool  gustValid;
+  computeGustFrontSignals(pressure, temp, rawRise10, corrRise10, tDrop10, gustValid);
+  if (!gustValid) corrRise10 = rawRise10;
+
   // Device uptime in seconds (rollover-proof: esp_timer is 64-bit microseconds).
   uint32_t uptimeSec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
   // Monitoring time in seconds: elapsed since the first real measurement (0 until then).
@@ -883,17 +895,21 @@ void sendDataViaBluetooth(float temp, float pressure, float humidity, AlertLevel
 
   // p_drop_*  = raw drops (kept for the app + thesis comparison)
   // cp_drop_* = altitude-corrected drops actually used by the alert logic
+  // p_rise_10m / cp_rise_10m = raw / altitude-corrected 10-min pressure rise
+  //   (gust-front window; cp falls back to raw until temp+alt history exists)
   // up_s = uptime since boot; mon_s = time since first measurement (drives app countdown)
   // fix/lat/lon/alt = GPS context (Stage 4 app addition)
-  char json[288];
+  char json[336];
   snprintf(json, sizeof(json),
     "{\"temp\":%.1f,\"pressure\":%.2f,\"humidity\":%.1f,\"alert\":%d,"
     "\"p_drop_3h\":%.2f,\"p_drop_30m\":%.2f,"
     "\"cp_drop_3h\":%.2f,\"cp_drop_30m\":%.2f,"
+    "\"p_rise_10m\":%.2f,\"cp_rise_10m\":%.2f,"
     "\"bat\":%d,\"up_s\":%lu,\"mon_s\":%lu,"
     "\"fix\":%d,\"lat\":%.5f,\"lon\":%.5f,\"alt\":%.1f}",
     temp, pressure, humidity, (int)alert,
     rawDrop3h, rawDrop30min, corrDrop3h, corrDrop30min,
+    rawRise10, corrRise10,
     batteryPct, (unsigned long)uptimeSec, (unsigned long)monSec,
     fix, lastValidLat, lastValidLng, altOut);
 
@@ -958,11 +974,12 @@ void printDebugInfo(float temp, float pressure, float humidity, AlertLevel alert
   Serial.print(" °C  ("); Serial.print(isConvectivelyMoist(temp, humidity) ? "MOIST" : "dry");
   Serial.print(", threshold "); Serial.print(dpThreshold, 1); Serial.println(" °C)");
 
-  float rise10, tDrop10;
+  float rawRise10, rise10, tDrop10;
   bool  gustValid;
-  computeGustFrontSignals(pressure, temp, rise10, tDrop10, gustValid);
+  computeGustFrontSignals(pressure, temp, rawRise10, rise10, tDrop10, gustValid);
+  Serial.print("🌬  10m P rise raw: "); Serial.print(rawRise10, 2); Serial.println(" hPa");
   if (gustValid) {
-    Serial.print("🌬  10m P rise corr:"); Serial.print(rise10, 2);  Serial.println(" hPa");
+    Serial.print("🌬  10m P rise corr:"); Serial.print(rise10, 2);  Serial.println(" hPa  (alt-corrected)");
     Serial.print("🌬  10m Temp drop:  "); Serial.print(tDrop10, 2); Serial.println(" °C");
   } else {
     Serial.println("🌬  Gust front:     inactive (needs 10 min of temp + altitude history)");
