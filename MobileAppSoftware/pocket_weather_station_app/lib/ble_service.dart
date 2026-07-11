@@ -27,7 +27,7 @@ enum WatchStatus { connecting, connected, reconnecting, disconnected }
 /// The firmware advertises only its name (not the service UUID), so the initial
 /// discovery filters on the advertised name rather than `withServices`.
 class WeatherBleService {
-  static const String deviceName = 'MountainGuide_Weather';
+  static const String deviceName = 'Pocket-Weather-Station';
   static final Guid serviceUuid = Guid('5b3e1f00-1c2d-4e3a-9b6f-0a1b2c3d4e5f');
   static final Guid dataCharUuid = Guid('5b3e1f01-1c2d-4e3a-9b6f-0a1b2c3d4e5f');
 

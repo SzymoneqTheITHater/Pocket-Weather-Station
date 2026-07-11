@@ -123,8 +123,10 @@ class SmsService {
   }
 
   /// Plain-ASCII alert summary, e.g.
-  /// "Storm alert: WATCH->WARNING 14:32. 3h drop 4.2hPa, 30m drop 1.8hPa.
-  ///  Loc: https://maps.google.com/?q=49.17912,20.08812".
+  /// "Storm alert: WATCH->WARNING 14:32. 3h drop 4.2hPa, 30m drop 1.8hPa,
+  ///  10m rise 0.8hPa. Loc: https://maps.google.com/?q=49.17912,20.08812".
+  /// Kept within a single 160-char GSM-7 segment in the typical (live-fix)
+  /// case so it sends reliably on weak signal.
   String _buildMessage(
     AlertLevel from,
     AlertLevel to,
@@ -136,8 +138,9 @@ class SmsService {
     final mm = now.minute.toString().padLeft(2, '0');
     final drop3h = data.corrDrop3h.toStringAsFixed(1);
     final drop30m = data.corrDrop30m.toStringAsFixed(1);
+    final rise10m = data.corrRise10m.toStringAsFixed(1);
     return 'Storm alert: ${from.label}->${to.label} $hh:$mm. '
-        '3h drop ${drop3h}hPa, 30m drop ${drop30m}hPa. '
+        '3h drop ${drop3h}hPa, 30m drop ${drop30m}hPa, 10m rise ${rise10m}hPa. '
         '${_location(data, lastFixAt, now)}';
   }
 

@@ -35,10 +35,16 @@ class WatcherMenuDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Drawer(
-      child: SafeArea(
+    // Start the whole drawer panel below the status bar so its background
+    // never extends under the clock/battery icons. viewPadding (not
+    // SafeArea/padding) is used because padding can be consumed to zero by
+    // ancestors in edge-to-edge mode.
+    final systemInsets = MediaQuery.viewPaddingOf(context);
+    return Padding(
+      padding: EdgeInsets.only(top: systemInsets.top),
+      child: Drawer(
         child: ListView(
-          padding: EdgeInsets.zero,
+          padding: EdgeInsets.only(bottom: systemInsets.bottom),
           children: [
             ListTile(
               leading: const Icon(Icons.sms),

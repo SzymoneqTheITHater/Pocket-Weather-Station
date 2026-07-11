@@ -14,7 +14,7 @@
  * Buzzer (active) -> ESP32 GPIO32
  *
  * ─── CONNECTIVITY (BLE / NimBLE-Arduino) ─────────────────────────────────────
- * The device is a BLE GATT peripheral advertising as "MountainGuide_Weather".
+ * The device is a BLE GATT peripheral advertising as "Pocket-Weather-Station".
  * It exposes ONE custom service containing ONE DATA characteristic with the
  * READ + NOTIFY properties. The characteristic value is the current-reading
  * JSON (same fields as before). Each measurement cycle the firmware updates
@@ -181,7 +181,7 @@ const int ALERT_DEESCALATE_HOLD_READINGS = 5;   // 5 × 2 min = 10 minutes (real
 #endif
 int currentAlertEnteredCount = 0;   // measurementCount when currentAlert was last (re)entered
 
-const char* deviceName = "MountainGuide_Weather";
+const char* deviceName = "Pocket-Weather-Station";
 
 // ─── LED pins ─────────────────────────────────────────────────────────────────
 const int PIN_LED_GREEN  = 25;
