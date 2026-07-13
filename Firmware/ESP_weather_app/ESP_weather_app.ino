@@ -40,7 +40,7 @@
  */
 
 // ─── SIMULATION FLAGS — edit these to switch modes ───────────────────────────
-#define SIMULATION_MODE  0   // 0 = real sensors,  1 = simulated data
+#define SIMULATION_MODE  1   // 0 = real sensors,  1 = simulated data
 #define SIMULATION_FAST  0   // 0 = slow/realistic, 1 = fast/testing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1040,6 +1040,14 @@ void updateGPS() {
 
   // Cache the latest valid fix so the storm algorithm and BLE payload can use it
   // between the (slower) print cycles below.
+  //
+  // In SIMULATION_MODE this caching is skipped on purpose: lastValidAltitude must
+  // stay NAN so the algorithm runs on RAW (uncorrected) values and stays fully
+  // deterministic. Otherwise a real GPS fix acquired mid-run — or just its
+  // vertical drift — would inject a phantom altitude correction (~0.12 hPa/m) into
+  // the simulated drops and flip the alert level. The block below still parses and
+  // prints GPS as a standalone test.
+#if SIMULATION_MODE == 0
   if (gps.location.isUpdated() && gps.location.isValid()) {
     lastValidLat = gps.location.lat();
     lastValidLng = gps.location.lng();
@@ -1047,9 +1055,10 @@ void updateGPS() {
   if (gps.altitude.isUpdated() && gps.altitude.isValid()) {
     lastValidAltitude = gps.altitude.meters();
   }
-  gpsHasFix = gps.location.isValid() 
-              && !isnan(lastValidAltitude) 
+  gpsHasFix = gps.location.isValid()
+              && !isnan(lastValidAltitude)
               && gps.location.age() < GPS_FIX_MAX_AGE_MS;
+#endif
 
   // Print a summary once per interval
   if (millis() - lastGpsPrint >= GPS_PRINT_INTERVAL) {

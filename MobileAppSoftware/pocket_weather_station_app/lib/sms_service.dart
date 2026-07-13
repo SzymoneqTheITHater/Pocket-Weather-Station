@@ -136,9 +136,9 @@ class SmsService {
     final now = DateTime.now();
     final hh = now.hour.toString().padLeft(2, '0');
     final mm = now.minute.toString().padLeft(2, '0');
-    final drop3h = data.corrDrop3h.toStringAsFixed(1);
-    final drop30m = data.corrDrop30m.toStringAsFixed(1);
-    final rise10m = data.corrRise10m.toStringAsFixed(1);
+    final drop3h = data.corrDrop3h.toStringAsFixed(2);
+    final drop30m = data.corrDrop30m.toStringAsFixed(2);
+    final rise10m = data.corrRise10m.toStringAsFixed(2);
     return 'Storm alert: ${from.label}->${to.label} $hh:$mm. '
         '3h drop ${drop3h}hPa, 30m drop ${drop30m}hPa, 10m rise ${rise10m}hPa. '
         '${_location(data, lastFixAt, now)}';
